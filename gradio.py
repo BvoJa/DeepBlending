@@ -29,11 +29,11 @@ gr = import_gradio_package()
 
 DEFAULT_OUTPUT_DIR = "results/gradio"
 EXAMPLES = [
-    ["data/1_source.png", "data/1_mask.png", "data/1_target.png", 300, 512, 200, 235],
-    ["data/2_source.png", "data/2_mask.png", "data/2_target.png", 300, 512, 200, 235],
-    ["data/3_source.png", "data/3_mask.png", "data/3_target.png", 300, 512, 200, 235],
-    ["data/4_source.png", "data/4_mask.png", "data/4_target.png", 300, 512, 200, 235],
-    ["data/5_source.png", "data/5_mask.png", "data/5_target.png", 300, 512, 200, 235],
+    ["data/1_source.png", "data/1_target.png", 300, 512, 200, 235],
+    ["data/2_source.png", "data/2_target.png", 300, 512, 200, 235],
+    ["data/3_source.png", "data/3_target.png", 300, 512, 200, 235],
+    ["data/4_source.png", "data/4_target.png", 300, 512, 200, 235],
+    ["data/5_source.png", "data/5_target.png", 300, 512, 200, 235],
 ]
 
 
@@ -42,24 +42,50 @@ def center_position(ts):
     return center, center
 
 
-def file_to_numpy(file_path, mode):
-    if file_path is None:
+def to_rgb_array(image):
+    if image is None:
         return None
-    path = file_path.name if hasattr(file_path, "name") else file_path
-    return np.array(Image.open(path).convert(mode))
+    if isinstance(image, np.ndarray):
+        return np.array(Image.fromarray(image.astype(np.uint8)).convert("RGB"))
+    return np.array(Image.open(image).convert("RGB"))
 
 
-def load_uploaded_files(source_file, mask_file, target_file):
-    return (
-        file_to_numpy(source_file, "RGB"),
-        file_to_numpy(mask_file, "L"),
-        file_to_numpy(target_file, "RGB"),
-    )
+def editor_to_source_and_mask(source_editor):
+    if source_editor is None:
+        raise gr.Error("Upload a source image and draw the object mask first.")
+
+    if not isinstance(source_editor, dict):
+        raise gr.Error("Use the source editor so the demo can read your drawn mask.")
+
+    source = source_editor.get("background")
+    if source is None:
+        source = source_editor.get("composite")
+    source = to_rgb_array(source)
+    if source is None:
+        raise gr.Error("Upload a source image before drawing the mask.")
+
+    mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    for layer in source_editor.get("layers") or []:
+        if layer is None:
+            continue
+        layer = np.asarray(layer)
+        if layer.ndim == 3 and layer.shape[2] == 4:
+            layer_mask = layer[:, :, 3] > 0
+        elif layer.ndim == 3:
+            layer_mask = np.any(layer[:, :, :3] > 0, axis=2)
+        else:
+            layer_mask = layer > 0
+        mask[layer_mask] = 255
+
+    if mask.max() == 0:
+        raise gr.Error("Draw over the object in the source image before previewing or running.")
+
+    return source, mask
 
 
-def placement_preview(source_image, mask_image, target_image, ss, ts, x, y):
-    if source_image is None or mask_image is None or target_image is None:
-        raise gr.Error("Upload source, mask, and target images first.")
+def placement_preview(source_editor, target_image, ss, ts, x, y):
+    if target_image is None:
+        raise gr.Error("Upload a target image first.")
 
     ss = int(ss)
     ts = int(ts)
@@ -67,6 +93,7 @@ def placement_preview(source_image, mask_image, target_image, ss, ts, x, y):
     y = int(y)
     validate_placement(x, y, ss, ts)
 
+    source_image, mask_image = editor_to_source_and_mask(source_editor)
     source = Image.fromarray(source_image.astype(np.uint8)).convert("RGB").resize((ss, ss))
     target = Image.fromarray(target_image.astype(np.uint8)).convert("RGB").resize((ts, ts))
     mask = Image.fromarray(mask_image.astype(np.uint8)).convert("L").resize((ss, ss))
@@ -87,12 +114,11 @@ def placement_preview(source_image, mask_image, target_image, ss, ts, x, y):
     preview_region = preview[top: top + ss, left: left + ss]
     preview_region[outline] = preview_region[outline] * 0.65 + np.array([255, 80, 40]) * 0.35
 
-    return np.clip(preview, 0, 255).astype(np.uint8)
+    return np.clip(preview, 0, 255).astype(np.uint8), (mask_np * 255).astype(np.uint8)
 
 
 def run_first_pass(
-    source_image,
-    mask_image,
+    source_editor,
     target_image,
     ss,
     ts,
@@ -107,9 +133,10 @@ def run_first_pass(
     seed,
     output_dir,
 ):
-    if source_image is None or mask_image is None or target_image is None:
-        raise gr.Error("Upload source, mask, and target images first.")
+    if target_image is None:
+        raise gr.Error("Upload a target image first.")
 
+    source_image, mask_image = editor_to_source_and_mask(source_editor)
     seed_value = None if seed is None or int(seed) < 0 else int(seed)
     image, output_path, history = first_pass_blend(
         source_image=source_image,
@@ -140,24 +167,15 @@ def build_demo():
         gr.Markdown("# Deep Image Blending")
 
         with gr.Row():
-            source_file = gr.File(label="Source file", file_types=["image"], type="filepath")
-            mask_file = gr.File(label="Mask file", file_types=["image"], type="filepath")
-            target_file = gr.File(label="Target file", file_types=["image"], type="filepath")
-
-        load_files_button = gr.Button("Load Selected Files")
-
-        with gr.Row():
-            source_image = gr.Image(
-                label="Source object image",
+            source_editor = gr.ImageEditor(
+                label="Source image: draw over the object to create the mask",
                 sources=["upload", "clipboard"],
                 type="numpy",
-                image_mode="RGB",
-            )
-            mask_image = gr.Image(
-                label="Source object mask",
-                sources=["upload", "clipboard"],
-                type="numpy",
-                image_mode="L",
+                image_mode="RGBA",
+                brush=gr.Brush(default_size=35, colors=["rgba(255, 120, 40, 0.75)"], color_mode="fixed"),
+                eraser=gr.Eraser(default_size=35),
+                layers=True,
+                transforms=[],
             )
             target_image = gr.Image(
                 label="Target image",
@@ -197,6 +215,7 @@ def build_demo():
 
         with gr.Row():
             preview_image = gr.Image(label="Placement preview", type="numpy")
+            mask_preview = gr.Image(label="Drawn mask", type="numpy", image_mode="L")
             result_image = gr.Image(label="First-pass result", type="numpy")
 
         with gr.Row():
@@ -205,22 +224,16 @@ def build_demo():
 
         status = gr.Textbox(label="Status", interactive=False)
 
-        load_files_button.click(
-            load_uploaded_files,
-            inputs=[source_file, mask_file, target_file],
-            outputs=[source_image, mask_image, target_image],
-        )
         center_button.click(center_position, inputs=[ts], outputs=[x, y])
         preview_button.click(
             placement_preview,
-            inputs=[source_image, mask_image, target_image, ss, ts, x, y],
-            outputs=[preview_image],
+            inputs=[source_editor, target_image, ss, ts, x, y],
+            outputs=[preview_image, mask_preview],
         )
         run_button.click(
             run_first_pass,
             inputs=[
-                source_image,
-                mask_image,
+                source_editor,
                 target_image,
                 ss,
                 ts,
@@ -240,7 +253,7 @@ def build_demo():
 
         gr.Examples(
             examples=EXAMPLES,
-            inputs=[source_image, mask_image, target_image, ss, ts, x, y],
+            inputs=[source_editor, target_image, ss, ts, x, y],
         )
 
     return demo
