@@ -1,4 +1,5 @@
 import os
+import inspect
 import sys
 from pathlib import Path
 
@@ -59,6 +60,48 @@ def load_css():
     return ""
 
 
+def make_upload_image(label, image_mode="RGB"):
+    kwargs = {
+        "label": label,
+        "interactive": True,
+        "type": "numpy",
+        "image_mode": image_mode,
+    }
+    params = inspect.signature(gr.Image).parameters
+    if "source" in params:
+        kwargs["source"] = "upload"
+    else:
+        kwargs["sources"] = ["upload"]
+    return gr.Image(**kwargs)
+
+
+def make_source_mask_input(label):
+    image_params = inspect.signature(gr.Image).parameters
+    if "tool" in image_params:
+        kwargs = {
+            "label": label,
+            "interactive": True,
+            "type": "numpy",
+            "tool": "sketch",
+        }
+        if "source" in image_params:
+            kwargs["source"] = "upload"
+        else:
+            kwargs["sources"] = ["upload"]
+        return gr.Image(**kwargs)
+
+    return gr.ImageEditor(
+        label=label,
+        sources=["upload"],
+        type="numpy",
+        image_mode="RGBA",
+        brush=gr.Brush(default_size=35, colors=["rgba(255, 120, 40, 0.75)"], color_mode="fixed"),
+        eraser=gr.Eraser(default_size=35),
+        layers=True,
+        transforms=[],
+    )
+
+
 def center_position(ts):
     center = int(ts // 2)
     return center, center
@@ -109,6 +152,26 @@ def editor_to_source_and_mask(source_editor):
 
     if not isinstance(source_editor, dict):
         raise gr.Error("Use the source editor so the demo can read your drawn mask.")
+
+    if "image" in source_editor and "mask" in source_editor:
+        source = to_rgb_array(source_editor.get("image"))
+        raw_mask = source_editor.get("mask")
+        if source is None or raw_mask is None:
+            raise gr.Error("Upload a source image and draw the object mask first.")
+
+        raw_mask = np.asarray(raw_mask)
+        if raw_mask.ndim == 3 and raw_mask.shape[2] == 4:
+            mask = (raw_mask[:, :, 3] > 0).astype(np.uint8) * 255
+        elif raw_mask.ndim == 3:
+            mask = (np.any(raw_mask[:, :, :3] > 0, axis=2)).astype(np.uint8) * 255
+        else:
+            mask = (raw_mask > 0).astype(np.uint8) * 255
+
+        if mask.shape != source.shape[:2]:
+            mask = np.array(Image.fromarray(mask).resize(source.shape[:2][::-1]))
+        if mask.max() == 0:
+            raise gr.Error("Draw over the object in the source image before previewing or running.")
+        return source, mask
 
     source = source_editor.get("background")
     if source is None:
@@ -230,24 +293,10 @@ def create_demo_blend(runner):
                 with gr.Group():
                     gr.Markdown("# INPUT")
                     gr.Markdown("## 1. Upload source image and draw object mask")
-                    source_editor = gr.ImageEditor(
-                        label="Source image",
-                        sources=["upload", "clipboard"],
-                        type="filepath",
-                        image_mode="RGBA",
-                        brush=gr.Brush(default_size=35, colors=["rgba(255, 120, 40, 0.75)"], color_mode="fixed"),
-                        eraser=gr.Eraser(default_size=35),
-                        layers=True,
-                        transforms=[],
-                    )
+                    source_editor = make_source_mask_input("Source image")
 
                     gr.Markdown("## 2. Upload target image")
-                    target_image = gr.Image(
-                        label="Target image",
-                        sources=["upload", "clipboard"],
-                        type="filepath",
-                        image_mode="RGB",
-                    )
+                    target_image = make_upload_image("Target image")
                     target_path = gr.Textbox(
                         label="Fast target path on Kaggle/local machine",
                         placeholder="/kaggle/input/your-dataset/target.jpg",
