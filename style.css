@@ -1,0 +1,11 @@
+h1 {
+  text-align: center;
+}
+
+footer {
+  display: none !important;
+}
+
+.wrap {
+  justify-content: space-around !important;
+}
