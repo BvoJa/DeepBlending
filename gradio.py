@@ -543,6 +543,41 @@ def segment_source_with_sam(
     return annotated, original, mask_image, mask_image, points, point_labels, status
 
 
+def segment_source_image_clicks_with_sam(
+    sam_click_mode,
+    source_image,
+    source_path,
+    sam_original_source,
+    sam_points,
+    sam_point_labels,
+    sam_checkpoint_path,
+    gpu_id,
+    evt: gr.SelectData,
+):
+    if not sam_click_mode:
+        return (
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            sam_points or [],
+            sam_point_labels or [],
+            gr.update(),
+        )
+
+    return segment_source_with_sam(
+        None,
+        sam_original_source,
+        source_image,
+        source_path,
+        sam_points,
+        sam_point_labels,
+        sam_checkpoint_path,
+        gpu_id,
+        evt,
+    )
+
+
 def placement_preview(source_image, source_path, mask_image, mask_path, target_image, target_path, ss, ts, x, y):
     ss = int(ss)
     ts = int(ts)
@@ -625,7 +660,7 @@ def run_first_pass(
 
 
 def clear_demo():
-    return None, "", None, "", None, "", None, None, [], [], None, None, None, None, {}, "", loading_panel_html()
+    return None, "", None, "", None, "", False, None, None, [], [], None, None, None, None, {}, "", loading_panel_html()
 
 
 def create_demo_blend(runner):
@@ -653,6 +688,10 @@ def create_demo_blend(runner):
                         placeholder="/kaggle/input/your-dataset/mask.png",
                     )
                     with gr.Accordion("SAM mask extraction", open=False):
+                        sam_click_mode = gr.Checkbox(
+                            value=False,
+                            label="Use two clicks on Source image for SAM",
+                        )
                         with gr.Row():
                             load_sam_source_button = gr.Button("Use Source For SAM")
                             clear_sam_button = gr.Button("Clear SAM Box")
@@ -809,6 +848,33 @@ def create_demo_blend(runner):
         )
         center_button.click(center_position, inputs=[ts], outputs=[x, y])
 
+        source_sam_select_event = source_image.select(
+            segment_source_image_clicks_with_sam,
+            inputs=[
+                sam_click_mode,
+                source_image,
+                source_path,
+                sam_original_source,
+                sam_points,
+                sam_point_labels,
+                sam_checkpoint_path,
+                gpu_id,
+            ],
+            outputs=[
+                sam_selector,
+                sam_original_source,
+                mask_image,
+                mask_preview,
+                sam_points,
+                sam_point_labels,
+                status,
+            ],
+            show_progress="full",
+            show_progress_on=[mask_preview],
+        )
+        source_sam_select_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        source_sam_select_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
         sam_select_event = sam_selector.select(
             segment_source_with_sam,
             inputs=[
@@ -906,6 +972,7 @@ def create_demo_blend(runner):
                 mask_path,
                 target_image,
                 target_path,
+                sam_click_mode,
                 sam_selector,
                 sam_original_source,
                 sam_points,
