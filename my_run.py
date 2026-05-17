@@ -106,53 +106,19 @@ def paste_center(canvas, image):
     return canvas
 
 
-def fit_to_square_canvas(source, mask, size):
-    source_h, source_w = source.shape[:2]
-    ratio = min(size / max(1, source_w), size / max(1, source_h))
-    resized_w = max(1, int(round(source_w * ratio)))
-    resized_h = max(1, int(round(source_h * ratio)))
-
-    source_resized = np.array(Image.fromarray(source).resize((resized_w, resized_h), Image.LANCZOS))
-    mask_resized = np.array(Image.fromarray(mask * 255).resize((resized_w, resized_h), Image.NEAREST))
-    mask_resized = (mask_resized > 0).astype(np.uint8)
-
-    source_canvas = np.zeros((size, size, 3), dtype=np.uint8)
-    mask_canvas = np.zeros((size, size), dtype=np.uint8)
-    paste_center(source_canvas, source_resized)
-    paste_center(mask_canvas, mask_resized)
-    return source_canvas, mask_canvas
-
-
-def scale_canvas_pair(source_canvas, mask_canvas, mask_scale=1.0):
-    scale = float(mask_scale)
-    size = source_canvas.shape[0]
-    if abs(scale - 1.0) < 1e-6:
-        return source_canvas, mask_canvas
-
-    scaled_size = max(1, int(round(size * scale)))
-    source_resized = np.array(Image.fromarray(source_canvas).resize((scaled_size, scaled_size), Image.LANCZOS))
-    mask_resized = np.array(Image.fromarray(mask_canvas * 255).resize((scaled_size, scaled_size), Image.NEAREST))
-    mask_resized = (mask_resized > 0).astype(np.uint8)
-
-    source_scaled = np.zeros_like(source_canvas)
-    mask_scaled = np.zeros_like(mask_canvas)
-    paste_center(source_scaled, source_resized)
-    paste_center(mask_scaled, mask_resized)
-    return source_scaled, mask_scaled
-
-
 def prepare_source_object(source_image, mask_image, size, mask_scale=1.0):
     source = load_rgb_array(source_image)
     mask = load_mask_array(mask_image)
-    source_h, source_w = source.shape[:2]
-    if mask.shape[:2] != (source_h, source_w):
-        mask = load_mask_array(mask_image, (source_w, source_h))
+    if mask.shape[:2] != source.shape[:2]:
+        raise ValueError(
+            "The mask must have the same height and width as the source image. "
+            "Use the SAM mask generated from this source image, or upload a matching mask."
+        )
 
     if mask_bbox(mask) is None:
         raise ValueError("The mask is empty. Draw, extract, or upload a non-empty object mask.")
 
-    source_canvas, mask_canvas = fit_to_square_canvas(source, mask, size)
-    return scale_canvas_pair(source_canvas, mask_canvas, mask_scale)
+    return source, mask
 
 
 def paste_source_mask_to_target(x_start, y_start, target_img, mask):
@@ -183,6 +149,20 @@ def validate_placement(x, y, ss, ts):
         )
 
 
+def validate_source_placement(x, y, source_shape, target_shape):
+    source_h, source_w = source_shape[:2]
+    target_h, target_w = target_shape[:2]
+    half_h = source_h * 0.5
+    half_w = source_w * 0.5
+    if x - half_h < 0 or y - half_w < 0 or x + half_h > target_h or y + half_w > target_w:
+        raise ValueError(
+            "The source image must fit inside the target canvas. "
+            f"Use x between {int(half_h)} and {int(target_h - half_h)}, "
+            f"and y between {int(half_w)} and {int(target_w - half_w)} "
+            f"for source size {source_h}x{source_w} and target size {target_h}x{target_w}."
+        )
+
+
 def first_pass_blend(
     source_image,
     mask_image,
@@ -203,7 +183,6 @@ def first_pass_blend(
     progress_interval=10,
     save_output=True,
 ):
-    validate_placement(x, y, ss, ts)
     device = resolve_device(gpu_id)
     if seed is not None:
         torch.manual_seed(int(seed))
@@ -214,6 +193,7 @@ def first_pass_blend(
 
     source_img, mask_img = prepare_source_object(source_image, mask_image, ss, mask_scale)
     target_img = load_rgb_image(target_image, ts)
+    validate_source_placement(x, y, source_img.shape, target_img.shape)
 
     canvas_mask = paste_source_mask_to_target(x, y, target_img, mask_img)
     canvas_mask = numpy2tensor(canvas_mask, device)
@@ -226,7 +206,8 @@ def first_pass_blend(
     input_img = torch.randn(target_img.shape, device=device)
 
     mask_img = numpy2tensor(mask_img, device)
-    mask_img = mask_img.squeeze(0).repeat(3, 1).view(3, ss, ss).unsqueeze(0)
+    source_h, source_w = source_img.shape[2], source_img.shape[3]
+    mask_img = mask_img.squeeze(0).repeat(3, 1).view(3, source_h, source_w).unsqueeze(0)
 
     optimizer = optim.LBFGS([input_img.requires_grad_()])
     mse = torch.nn.MSELoss()
@@ -261,12 +242,10 @@ def first_pass_blend(
             style_loss /= len(blend_gram_style)
             style_loss *= style_weight
 
-            blend_obj = blend_img[
-                :,
-                :,
-                int(x - source_img.shape[2] * 0.5): int(x + source_img.shape[2] * 0.5),
-                int(y - source_img.shape[3] * 0.5): int(y + source_img.shape[3] * 0.5),
-            ]
+            source_h, source_w = source_img.shape[2], source_img.shape[3]
+            top = int(x - source_h * 0.5)
+            left = int(y - source_w * 0.5)
+            blend_obj = blend_img[:, :, top:top + source_h, left:left + source_w]
             source_object_features = vgg(mean_shift(source_img * mask_img))
             blend_object_features = vgg(mean_shift(blend_obj * mask_img))
             content_loss = content_weight * mse(blend_object_features.relu2_2, source_object_features.relu2_2)
@@ -315,7 +294,7 @@ def parse_args():
     parser.add_argument("--mask_file", type=str, default="data/1_mask.png", help="path to the mask image")
     parser.add_argument("--target_file", type=str, default="data/1_target.png", help="path to the target image")
     parser.add_argument("--output_dir", type=str, default="results/my_run", help="path to output")
-    parser.add_argument("--ss", type=int, default=512, help="source canvas size")
+    parser.add_argument("--ss", type=int, default=512, help="kept for compatibility; source and mask are not resized")
     parser.add_argument("--ts", type=int, default=512, help="target image size")
     parser.add_argument("--x", type=int, default=256, help="vertical location center")
     parser.add_argument("--y", type=int, default=256, help="horizontal location center")
@@ -325,7 +304,7 @@ def parse_args():
     parser.add_argument("--style_weight", type=float, default=1e4, help="style loss weight")
     parser.add_argument("--content_weight", type=float, default=1.0, help="content loss weight")
     parser.add_argument("--tv_weight", type=float, default=1e-6, help="total variation loss weight")
-    parser.add_argument("--mask_scale", type=float, default=1.0, help="uniform object/mask scale inside the source canvas")
+    parser.add_argument("--mask_scale", type=float, default=1.0, help="kept for compatibility; source and mask are not scaled")
     parser.add_argument("--seed", type=int, default=None, help="optional random seed")
     return parser.parse_args()
 

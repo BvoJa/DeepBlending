@@ -96,18 +96,18 @@ Usage:
 - Or upload a mask image in the mask box.
 - Upload a target image using the same plain image-upload style as DragonDiffusion.
 - Optionally paste Kaggle/local file paths to avoid slow browser upload.
-- Adjust object canvas size, object/mask scale, target size, and object center.
+- Adjust target size and object center.
 - Adjust the loss weights that contribute to the first-pass total loss.
 - Click `Preview Placement` to inspect the mask and location.
 - Click `Edit` to run first-pass image blending.
 """
 
 examples_blend = [
-    ["data/1_source.png", "data/1_mask.png", "data/1_target.png", 512, 512, 256, 256],
-    ["data/2_source.png", "data/2_mask.png", "data/2_target.png", 512, 512, 256, 256],
-    ["data/3_source.png", "data/3_mask.png", "data/3_target.png", 512, 512, 256, 256],
-    ["data/4_source.png", "data/4_mask.png", "data/4_target.png", 512, 512, 256, 256],
-    ["data/5_source.png", "data/5_mask.png", "data/5_target.png", 512, 512, 256, 256],
+    ["data/1_source.png", "data/1_mask.png", "data/1_target.png", 512, 256, 256],
+    ["data/2_source.png", "data/2_mask.png", "data/2_target.png", 512, 256, 256],
+    ["data/3_source.png", "data/3_mask.png", "data/3_target.png", 512, 256, 256],
+    ["data/4_source.png", "data/4_mask.png", "data/4_target.png", 512, 256, 256],
+    ["data/5_source.png", "data/5_mask.png", "data/5_target.png", 512, 256, 256],
 ]
 
 
@@ -339,6 +339,23 @@ def fit_placement(x, y, ss, ts):
     max_center = int(np.floor(ts - half))
     fitted_x = int(np.clip(int(x), min_center, max_center))
     fitted_y = int(np.clip(int(y), min_center, max_center))
+    return fitted_x, fitted_y
+
+
+def fit_source_placement(x, y, source_shape, ts):
+    source_h, source_w = source_shape[:2]
+    if source_h > ts or source_w > ts:
+        raise gr.Error(
+            f"Source image size {source_h}x{source_w} is larger than target size {ts}x{ts}. "
+            "Use a larger target size or a smaller source image."
+        )
+
+    min_x = int(np.ceil(source_h * 0.5))
+    max_x = int(np.floor(ts - source_h * 0.5))
+    min_y = int(np.ceil(source_w * 0.5))
+    max_y = int(np.floor(ts - source_w * 0.5))
+    fitted_x = int(np.clip(int(x), min_x, max_x))
+    fitted_y = int(np.clip(int(y), min_y, max_y))
     return fitted_x, fitted_y
 
 
@@ -645,30 +662,31 @@ def segment_source_image_clicks_with_sam(
 def placement_preview(source_image, source_path, source_original_image, mask_image, mask_path, target_image, target_path, ss, ts, mask_scale, x, y):
     ss = int(ss)
     ts = int(ts)
-    x, y = fit_placement(x, y, ss, ts)
 
     target_image = resolve_target(target_image, target_path)
     source_input, mask_input = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path)
     source_image, prepared_mask = prepare_source_object(source_input, mask_input, ss, mask_scale)
+    source_h, source_w = source_image.shape[:2]
+    x, y = fit_source_placement(x, y, source_image.shape, ts)
     source = Image.fromarray(source_image.astype(np.uint8)).convert("RGB")
     target = Image.fromarray(to_rgb_array(target_image).astype(np.uint8)).convert("RGB").resize((ts, ts))
     mask = Image.fromarray((prepared_mask * 255).astype(np.uint8)).convert("L")
-    mask_display = to_mask_array(mask_input)
+    mask_display = (prepared_mask * 255).astype(np.uint8)
 
     source_np = np.array(source).astype(np.float32)
     target_np = np.array(target).astype(np.float32)
     mask_np = (np.array(mask) > 0).astype(np.float32)
 
-    top = int(x - ss * 0.5)
-    left = int(y - ss * 0.5)
+    top = int(x - source_h * 0.5)
+    left = int(y - source_w * 0.5)
     preview = target_np.copy()
-    region = preview[top: top + ss, left: left + ss]
+    region = preview[top: top + source_h, left: left + source_w]
 
     alpha = mask_np[..., None] * 0.65
     region[:] = region * (1 - alpha) + source_np * alpha
 
     outline = mask_np > 0
-    preview_region = preview[top: top + ss, left: left + ss]
+    preview_region = preview[top: top + source_h, left: left + source_w]
     preview_region[outline] = preview_region[outline] * 0.65 + np.array([255, 80, 40]) * 0.35
 
     return np.clip(preview, 0, 255).astype(np.uint8), mask_display, x, y
@@ -700,7 +718,8 @@ def run_first_pass(
     source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path)
     ss = int(ss)
     ts = int(ts)
-    x, y = fit_placement(x, y, ss, ts)
+    prepared_source, _ = prepare_source_object(source_image, mask_image, ss, mask_scale)
+    x, y = fit_source_placement(x, y, prepared_source.shape, ts)
     seed_value = None if seed is None or int(seed) < 0 else int(seed)
 
     image, output_path, history = first_pass_blend(
@@ -737,6 +756,8 @@ def create_demo_blend(runner):
         source_original_image = gr.State(value=None)
         sam_points = gr.State([])
         sam_point_labels = gr.State([])
+        ss = gr.State(value=512)
+        mask_scale = gr.State(value=1.0)
 
         gr.Markdown(BLEND_DESCRIPTION)
         with gr.Row():
@@ -778,16 +799,7 @@ def create_demo_blend(runner):
                     load_paths_button = gr.Button("Load Images From Paths")
 
                     gr.Markdown("## 4. Position and size")
-                    with gr.Row():
-                        ss = gr.Slider(64, 768, value=512, step=1, label="Object canvas size (--ss)")
-                        ts = gr.Slider(128, 1024, value=512, step=1, label="Target size (--ts)")
-                    mask_scale = gr.Slider(
-                        0.2,
-                        1.5,
-                        value=1.0,
-                        step=0.01,
-                        label="Object/mask scale (--mask_scale)",
-                    )
+                    ts = gr.Slider(128, 1024, value=512, step=1, label="Target size (--ts)")
                     with gr.Row():
                         x = gr.Slider(0, 1024, value=256, step=1, label="Vertical center (--x)")
                         y = gr.Slider(0, 1024, value=256, step=1, label="Horizontal center (--y)")
@@ -840,7 +852,7 @@ def create_demo_blend(runner):
             gr.Markdown("Try some of the examples below ⬇️")
             gr.Examples(
                 examples=examples_blend,
-                inputs=[source_image, mask_image, target_image, ss, ts, x, y],
+                inputs=[source_image, mask_image, target_image, ts, x, y],
             )
 
         demo.load(

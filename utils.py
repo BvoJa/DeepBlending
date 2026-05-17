@@ -67,18 +67,21 @@ def compute_gt_gradient(x_start, y_start, source_img, target_img, mask, gpu_id):
     
     # mask and canvas mask
     canvas_mask = np.zeros((target_img.shape[0], target_img.shape[1]))
-    canvas_mask[int(x_start-source_img.shape[0]*0.5):int(x_start+source_img.shape[0]*0.5), int(y_start-source_img.shape[1]*0.5):int(y_start+source_img.shape[1]*0.5)] = mask
+    source_h, source_w = source_img.shape[:2]
+    top = int(x_start - source_h * 0.5)
+    left = int(y_start - source_w * 0.5)
+    canvas_mask[top:top + source_h, left:left + source_w] = mask
     
     # foreground gradient
     red_source_gradient = red_source_gradient * mask
     green_source_gradient = green_source_gradient * mask
     blue_source_gradient = blue_source_gradient * mask
     red_foreground_gradient = np.zeros((canvas_mask.shape))
-    red_foreground_gradient[int(x_start-source_img.shape[0]*0.5):int(x_start+source_img.shape[0]*0.5), int(y_start-source_img.shape[1]*0.5):int(y_start+source_img.shape[1]*0.5)] = red_source_gradient
+    red_foreground_gradient[top:top + source_h, left:left + source_w] = red_source_gradient
     green_foreground_gradient = np.zeros((canvas_mask.shape))
-    green_foreground_gradient[int(x_start-source_img.shape[0]*0.5):int(x_start+source_img.shape[0]*0.5), int(y_start-source_img.shape[1]*0.5):int(y_start+source_img.shape[1]*0.5)] = green_source_gradient
+    green_foreground_gradient[top:top + source_h, left:left + source_w] = green_source_gradient
     blue_foreground_gradient = np.zeros((canvas_mask.shape))
-    blue_foreground_gradient[int(x_start-source_img.shape[0]*0.5):int(x_start+source_img.shape[0]*0.5), int(y_start-source_img.shape[1]*0.5):int(y_start+source_img.shape[1]*0.5)] = blue_source_gradient
+    blue_foreground_gradient[top:top + source_h, left:left + source_w] = blue_source_gradient
     
     # background gradient
     red_background_gradient = red_target_gradient * (canvas_mask - 1) * (-1)
