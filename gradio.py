@@ -409,12 +409,18 @@ def load_image_path(path, mode):
 def load_images_from_paths(source_path, mask_path, target_path):
     has_source = bool((source_path or "").strip())
     source = load_image_path(source_path, "RGB") if has_source else gr.update()
-    mask = load_image_path(mask_path, "L") if (mask_path or "").strip() else gr.update()
+    has_mask = bool((mask_path or "").strip())
+    mask = load_image_path(mask_path, "L") if has_mask else gr.update()
     target = load_image_path(target_path, "RGB") if (target_path or "").strip() else gr.update()
     source_original = source if has_source else gr.update()
     sam_points = [] if has_source else gr.update()
     sam_point_labels = [] if has_source else gr.update()
-    return source, mask, target, source_original, sam_points, sam_point_labels
+    active_mask = to_mask_array(mask) if has_mask else gr.update()
+    return source, mask, target, source_original, sam_points, sam_point_labels, active_mask
+
+
+def store_active_mask(mask_image):
+    return to_mask_array(mask_image)
 
 
 def extract_drawn_source_and_mask(source_image):
@@ -466,7 +472,7 @@ def extract_drawn_source_and_mask(source_image):
     return source, mask
 
 
-def resolve_source_and_mask(source_image, mask_image, source_path="", source_original_image=None, mask_path=""):
+def resolve_source_and_mask(source_image, mask_image, source_path="", source_original_image=None, mask_path="", active_mask=None):
     source_from_path = load_image_path(source_path, "RGB")
     source_from_original = to_rgb_array(source_original_image)
     drawn_source, drawn_mask = extract_drawn_source_and_mask(source_image)
@@ -477,7 +483,11 @@ def resolve_source_and_mask(source_image, mask_image, source_path="", source_ori
         source = to_rgb_array(source_image)
 
     mask_from_path = load_image_path(mask_path, "L")
-    uploaded_mask = to_mask_array(mask_from_path if mask_from_path is not None else mask_image)
+    uploaded_mask = to_mask_array(mask_from_path)
+    if uploaded_mask is None:
+        uploaded_mask = to_mask_array(active_mask)
+    if uploaded_mask is None:
+        uploaded_mask = to_mask_array(mask_image)
     if uploaded_mask is not None:
         if source is None:
             raise gr.Error("Upload a source image before using a mask image.")
@@ -592,7 +602,7 @@ def segment_source_with_sam(
 
     if len(points) == 1:
         annotated = draw_sam_prompts(original, points)
-        return annotated, original, gr.update(), gr.update(), points, point_labels, "First SAM corner selected. Click the opposite corner."
+        return annotated, original, gr.update(), gr.update(), gr.update(), points, point_labels, "First SAM corner selected. Click the opposite corner."
 
     points = normalize_box_points(points)
     point_labels = [2, 3]
@@ -615,14 +625,14 @@ def segment_source_with_sam(
                 pts_labels,
             )
     except Exception as exc:
-        return annotated, original, gr.update(), gr.update(), points, point_labels, sam_error_message(exc)
+        return annotated, original, gr.update(), gr.update(), gr.update(), points, point_labels, sam_error_message(exc)
 
     mask = torch.ge(predicted_logits[0, 0, 0, :, :], 0).float().cpu().numpy()
     mask_image = (mask * 255).astype(np.uint8)
     annotated = draw_sam_prompts(original, points, mask_image)
     best_iou = float(predicted_iou[0, 0, 0].detach().cpu())
     status = f"SAM mask extracted. Estimated IoU: {best_iou:.3f}"
-    return annotated, original, mask_image, mask_image, points, point_labels, status
+    return annotated, original, mask_image, mask_image, mask_image, points, point_labels, status
 
 
 def segment_source_image_clicks_with_sam(
@@ -638,6 +648,7 @@ def segment_source_image_clicks_with_sam(
 ):
     if not sam_click_mode:
         return (
+            gr.update(),
             gr.update(),
             gr.update(),
             gr.update(),
@@ -659,12 +670,12 @@ def segment_source_image_clicks_with_sam(
     )
 
 
-def placement_preview(source_image, source_path, source_original_image, mask_image, mask_path, target_image, target_path, ss, ts, mask_scale, x, y):
+def placement_preview(source_image, source_path, source_original_image, mask_image, mask_path, active_mask, target_image, target_path, ss, ts, mask_scale, x, y):
     ss = int(ss)
     ts = int(ts)
 
     target_image = resolve_target(target_image, target_path)
-    source_input, mask_input = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path)
+    source_input, mask_input = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path, active_mask)
     source_image, prepared_mask = prepare_source_object(source_input, mask_input, ss, mask_scale)
     source_h, source_w = source_image.shape[:2]
     x, y = fit_source_placement(x, y, source_image.shape, ts)
@@ -698,6 +709,7 @@ def run_first_pass(
     source_original_image,
     mask_image,
     mask_path,
+    active_mask,
     target_image,
     target_path,
     ss,
@@ -715,7 +727,7 @@ def run_first_pass(
     output_dir,
 ):
     target_image = resolve_target(target_image, target_path)
-    source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path)
+    source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path, active_mask)
     ss = int(ss)
     ts = int(ts)
     prepared_source, _ = prepare_source_object(source_image, mask_image, ss, mask_scale)
@@ -748,7 +760,7 @@ def run_first_pass(
 
 
 def clear_demo():
-    return None, "", None, "", None, "", True, None, [], [], None, None, None, None, {}, "", loading_panel_html()
+    return None, "", None, "", None, None, "", True, None, [], [], None, None, None, None, {}, "", loading_panel_html()
 
 
 def create_demo_blend(runner):
@@ -756,6 +768,7 @@ def create_demo_blend(runner):
         source_original_image = gr.State(value=None)
         sam_points = gr.State([])
         sam_point_labels = gr.State([])
+        active_mask_state = gr.State(value=None)
         ss = gr.State(value=512)
         mask_scale = gr.State(value=1.0)
 
@@ -873,7 +886,7 @@ def create_demo_blend(runner):
         ).then(
             load_images_from_paths,
             inputs=[source_path, mask_path, target_path],
-            outputs=[source_image, mask_image, target_image, source_original_image, sam_points, sam_point_labels],
+            outputs=[source_image, mask_image, target_image, source_original_image, sam_points, sam_point_labels, active_mask_state],
             show_progress="full",
         )
         load_paths_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
@@ -896,17 +909,33 @@ def create_demo_blend(runner):
         source_upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
         source_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
 
-        for upload_component in (mask_image, target_image):
-            upload_event = upload_component.upload(
+        mask_upload_event = mask_image.upload(
+            show_upload_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
+            js=SHOW_UPLOAD_LOADING_JS,
+        ).then(
+            store_active_mask,
+            inputs=[mask_image],
+            outputs=[active_mask_state],
+            queue=False,
+            show_progress="hidden",
+        )
+        mask_upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        mask_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
+        target_upload_event = target_image.upload(
                 show_upload_loading,
                 inputs=[],
                 outputs=[loading_panel],
                 queue=False,
                 show_progress="hidden",
                 js=SHOW_UPLOAD_LOADING_JS,
-            )
-            upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
-            upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        )
+        target_upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        target_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
 
         source_image.change(
             hide_loading,
@@ -934,6 +963,7 @@ def create_demo_blend(runner):
                 source_original_image,
                 mask_image,
                 mask_preview,
+                active_mask_state,
                 sam_points,
                 sam_point_labels,
                 status,
@@ -959,7 +989,7 @@ def create_demo_blend(runner):
             js=SHOW_PREVIEW_LOADING_JS,
         ).then(
             placement_preview,
-            inputs=[source_image, source_path, source_original_image, mask_image, mask_path, target_image, target_path, ss, ts, mask_scale, x, y],
+            inputs=[source_image, source_path, source_original_image, mask_image, mask_path, active_mask_state, target_image, target_path, ss, ts, mask_scale, x, y],
             outputs=[preview_image, mask_preview, x, y],
             show_progress="full",
             show_progress_on=[preview_image, mask_preview],
@@ -982,6 +1012,7 @@ def create_demo_blend(runner):
                 source_original_image,
                 mask_image,
                 mask_path,
+                active_mask_state,
                 target_image,
                 target_path,
                 ss,
@@ -1013,6 +1044,7 @@ def create_demo_blend(runner):
                 source_path,
                 mask_image,
                 mask_path,
+                active_mask_state,
                 target_image,
                 target_path,
                 sam_click_mode,
