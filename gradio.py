@@ -31,15 +31,17 @@ DEFAULT_OUTPUT_DIR = "results/gradio"
 
 DESCRIPTION = """
 # Deep Image Blending
-Gradio demo for first-pass object blending. Upload a source image, draw over the object to create its mask, upload or enter a target image path, choose placement, then click `Edit`.
+Gradio demo for first-pass object blending. Upload source and target images, upload or draw the object mask, choose placement and loss weights, then click `Edit`.
 """
 
 BLEND_DESCRIPTION = """
 ## First-Pass Object Blending
 Usage:
-- Upload a source image and draw over the object to create the mask.
+- Upload source and target images using the same plain image-upload style as DragonDiffusion.
+- Upload a mask image, or draw over the object to create the mask.
 - Upload a target image, or paste a Kaggle/local file path to avoid slow browser upload.
 - Adjust source size, target size, and object center.
+- Adjust the loss weights that contribute to the first-pass total loss.
 - Click `Preview Placement` to inspect the mask and location.
 - Click `Edit` to run first-pass image blending.
 """
@@ -102,6 +104,12 @@ def make_source_mask_input(label):
     )
 
 
+def load_source_for_mask_editor(source_image):
+    if source_image is None:
+        return None
+    return to_rgb_array(source_image)
+
+
 def center_position(ts):
     center = int(ts // 2)
     return center, center
@@ -135,6 +143,17 @@ def to_rgba_array(image):
     return np.array(Image.open(image).convert("RGBA"))
 
 
+def to_mask_array(image):
+    if image is None:
+        return None
+    if isinstance(image, np.ndarray):
+        mask = np.array(Image.fromarray(image.astype(np.uint8)).convert("L"))
+    else:
+        mask = np.array(Image.open(image).convert("L"))
+    mask[mask > 0] = 255
+    return mask.astype(np.uint8)
+
+
 def resolve_target(target_image, target_path):
     path = (target_path or "").strip()
     if path:
@@ -144,6 +163,23 @@ def resolve_target(target_image, target_path):
     if target_image is None:
         raise gr.Error("Upload a target image or enter a Kaggle/local target path.")
     return target_image
+
+
+def resolve_source_and_mask(source_image, mask_image, source_editor):
+    source = to_rgb_array(source_image)
+
+    uploaded_mask = to_mask_array(mask_image)
+    if uploaded_mask is not None:
+        if source is None:
+            source, _ = editor_to_source_and_mask(source_editor)
+        if source is None:
+            raise gr.Error("Upload a source image before using a mask image.")
+        return source, uploaded_mask
+
+    drawn_source, drawn_mask = editor_to_source_and_mask(source_editor)
+    if source is not None:
+        drawn_source = source
+    return drawn_source, drawn_mask
 
 
 def editor_to_source_and_mask(source_editor):
@@ -203,13 +239,13 @@ def editor_to_source_and_mask(source_editor):
     return source, mask
 
 
-def placement_preview(source_editor, target_image, target_path, ss, ts, x, y):
+def placement_preview(source_image, source_editor, mask_image, target_image, target_path, ss, ts, x, y):
     ss = int(ss)
     ts = int(ts)
     x, y = fit_placement(x, y, ss, ts)
 
     target_image = resolve_target(target_image, target_path)
-    source_image, mask_image = editor_to_source_and_mask(source_editor)
+    source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_editor)
     source = Image.fromarray(source_image.astype(np.uint8)).convert("RGB").resize((ss, ss))
     target = Image.fromarray(to_rgb_array(target_image).astype(np.uint8)).convert("RGB").resize((ts, ts))
     mask = Image.fromarray(mask_image.astype(np.uint8)).convert("L").resize((ss, ss))
@@ -234,7 +270,9 @@ def placement_preview(source_editor, target_image, target_path, ss, ts, x, y):
 
 
 def run_first_pass(
+    source_image,
     source_editor,
+    mask_image,
     target_image,
     target_path,
     ss,
@@ -251,7 +289,7 @@ def run_first_pass(
     output_dir,
 ):
     target_image = resolve_target(target_image, target_path)
-    source_image, mask_image = editor_to_source_and_mask(source_editor)
+    source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_editor)
     ss = int(ss)
     ts = int(ts)
     x, y = fit_placement(x, y, ss, ts)
@@ -282,7 +320,7 @@ def run_first_pass(
 
 
 def clear_demo():
-    return None, None, "", None, None, None, None, {}, ""
+    return None, None, None, None, "", None, None, None, None, {}, ""
 
 
 def create_demo_blend(runner):
@@ -292,17 +330,21 @@ def create_demo_blend(runner):
             with gr.Column():
                 with gr.Group():
                     gr.Markdown("# INPUT")
-                    gr.Markdown("## 1. Upload source image and draw object mask")
-                    source_editor = make_source_mask_input("Source image")
+                    gr.Markdown("## 1. Upload source image")
+                    source_image = make_upload_image("Source image")
 
-                    gr.Markdown("## 2. Upload target image")
+                    gr.Markdown("## 2. Upload or draw object mask")
+                    mask_image = make_upload_image("Mask image", image_mode="L")
+                    source_editor = make_source_mask_input("Draw mask on source image")
+
+                    gr.Markdown("## 3. Upload target image")
                     target_image = make_upload_image("Target image")
                     target_path = gr.Textbox(
                         label="Fast target path on Kaggle/local machine",
                         placeholder="/kaggle/input/your-dataset/target.jpg",
                     )
 
-                    gr.Markdown("## 3. Position and size")
+                    gr.Markdown("## 4. Position and size")
                     with gr.Row():
                         ss = gr.Slider(64, 768, value=300, step=1, label="Source size (--ss)")
                         ts = gr.Slider(128, 1024, value=512, step=1, label="Target size (--ts)")
@@ -318,7 +360,7 @@ def create_demo_blend(runner):
                         clear_button = gr.Button("Clear")
 
                     with gr.Group():
-                        gr.Markdown("## 4. Optimization")
+                        gr.Markdown("## 5. Optimization")
                         with gr.Row():
                             gpu_id = gr.Dropdown(
                                 ["auto", "cpu", "cuda:0", "cuda:1"],
@@ -327,13 +369,16 @@ def create_demo_blend(runner):
                                 allow_custom_value=True,
                             )
                             num_steps = gr.Slider(1, 3000, value=100, step=1, label="Steps (--num_steps)")
+                        gr.Markdown("## Loss weights")
+                        with gr.Row():
+                            grad_weight = gr.Slider(0, 50000, value=1e4, step=100, label="Gradient loss weight")
+                            style_weight = gr.Slider(0, 50000, value=1e4, step=100, label="Style loss weight")
+                        with gr.Row():
+                            content_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Content loss weight")
+                            tv_weight = gr.Number(value=1e-6, label="TV loss weight")
                         with gr.Accordion("Advanced options", open=False):
                             seed = gr.Number(value=0, precision=0, label="Seed, use -1 for random")
                             output_dir = gr.Textbox(value=DEFAULT_OUTPUT_DIR, label="Output directory (--output_dir)")
-                            grad_weight = gr.Number(value=1e4, label="Gradient weight")
-                            style_weight = gr.Number(value=1e4, label="Style weight")
-                            content_weight = gr.Number(value=1.0, label="Content weight")
-                            tv_weight = gr.Number(value=1e-6, label="TV weight")
 
             with gr.Column():
                 with gr.Group():
@@ -354,19 +399,22 @@ def create_demo_blend(runner):
             gr.Markdown("Try some of the examples below ⬇️")
             gr.Examples(
                 examples=examples_blend,
-                inputs=[source_editor, target_image, ss, ts, x, y],
+                inputs=[source_image, target_image, ss, ts, x, y],
             )
 
+        source_image.change(load_source_for_mask_editor, inputs=[source_image], outputs=[source_editor])
         center_button.click(center_position, inputs=[ts], outputs=[x, y])
         preview_button.click(
             placement_preview,
-            inputs=[source_editor, target_image, target_path, ss, ts, x, y],
+            inputs=[source_image, source_editor, mask_image, target_image, target_path, ss, ts, x, y],
             outputs=[preview_image, mask_preview, x, y],
         )
         run_button.click(
             runner,
             inputs=[
+                source_image,
                 source_editor,
+                mask_image,
                 target_image,
                 target_path,
                 ss,
@@ -387,7 +435,7 @@ def create_demo_blend(runner):
         clear_button.click(
             clear_demo,
             inputs=[],
-            outputs=[source_editor, target_image, target_path, mask_preview, preview_image, output, output_file, losses, status],
+            outputs=[source_image, source_editor, mask_image, target_image, target_path, mask_preview, preview_image, output, output_file, losses, status],
         )
     return demo
 
