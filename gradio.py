@@ -1,4 +1,5 @@
 import os
+import html
 import inspect
 import sys
 from pathlib import Path
@@ -29,6 +30,50 @@ gr = import_gradio_package()
 
 DEFAULT_OUTPUT_DIR = "results/gradio"
 
+INSTALL_LOADING_JS = """
+() => {
+  if (window.deepBlendingLoadingInstalled) {
+    return;
+  }
+  window.deepBlendingLoadingInstalled = true;
+
+  window.deepBlendingSetLoading = (message) => {
+    const panel = document.getElementById("blend-loading-panel");
+    const label = document.getElementById("blend-loading-label");
+    if (!panel || !label) {
+      return;
+    }
+    label.textContent = message || "Working...";
+    panel.classList.add("is-active");
+  };
+
+  window.deepBlendingHideLoading = () => {
+    const panel = document.getElementById("blend-loading-panel");
+    if (panel) {
+      panel.classList.remove("is-active");
+    }
+  };
+
+  document.addEventListener(
+    "change",
+    (event) => {
+      const input = event.target;
+      if (!input || input.type !== "file" || !input.files || input.files.length === 0) {
+        return;
+      }
+      const count = input.files.length;
+      const noun = count === 1 ? "image" : "images";
+      window.deepBlendingSetLoading(`Uploading ${count} ${noun}...`);
+    },
+    true
+  );
+}
+"""
+
+SHOW_UPLOAD_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Preparing uploaded image...'); return []; }"
+SHOW_PREVIEW_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Creating placement preview...'); return []; }"
+SHOW_EDIT_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Running first-pass blending...'); return []; }"
+
 DESCRIPTION = """
 # Deep Image Blending
 Gradio demo for first-pass object blending. Upload a source image, draw or upload its mask, upload a target image, choose placement and loss weights, then click `Edit`.
@@ -54,6 +99,37 @@ examples_blend = [
     ["data/4_source.png", "data/4_mask.png", "data/4_target.png", 300, 512, 200, 235],
     ["data/5_source.png", "data/5_mask.png", "data/5_target.png", 300, 512, 200, 235],
 ]
+
+
+def loading_panel_html(message="", active=False):
+    active_class = " is-active" if active else ""
+    text = html.escape(message or "Working...")
+    return f"""
+<div id="blend-loading-panel" class="blend-loading{active_class}">
+  <div class="blend-loading-spinner" aria-hidden="true"></div>
+  <div id="blend-loading-label" class="blend-loading-label">{text}</div>
+</div>
+"""
+
+
+def show_loading(message):
+    return gr.update(value=loading_panel_html(message, active=True))
+
+
+def show_preview_loading():
+    return show_loading("Creating placement preview...")
+
+
+def show_edit_loading():
+    return show_loading("Running first-pass blending...")
+
+
+def show_upload_loading():
+    return show_loading("Preparing uploaded image...")
+
+
+def hide_loading():
+    return gr.update(value=loading_panel_html())
 
 
 def load_css():
@@ -342,7 +418,7 @@ def run_first_pass(
 
 
 def clear_demo():
-    return None, "", None, "", None, "", None, None, None, None, {}, ""
+    return None, "", None, "", None, "", None, None, None, None, {}, "", loading_panel_html()
 
 
 def create_demo_blend(runner):
@@ -424,6 +500,7 @@ def create_demo_blend(runner):
                         output_file = gr.File(label="Saved first_pass.png")
                         losses = gr.JSON(label="Latest logged losses")
                     status = gr.Textbox(label="Status", interactive=False)
+                    loading_panel = gr.HTML(loading_panel_html())
 
         with gr.Column():
             gr.Markdown("Try some of the examples below ⬇️")
@@ -432,18 +509,76 @@ def create_demo_blend(runner):
                 inputs=[source_image, mask_image, target_image, ss, ts, x, y],
             )
 
-        load_paths_button.click(
+        demo.load(
+            fn=None,
+            inputs=[],
+            outputs=[],
+            js=INSTALL_LOADING_JS,
+            queue=False,
+        )
+
+        load_paths_event = load_paths_button.click(
+            show_upload_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
+            js=SHOW_UPLOAD_LOADING_JS,
+        ).then(
             load_images_from_paths,
             inputs=[source_path, mask_path, target_path],
             outputs=[source_image, mask_image, target_image],
+            show_progress="full",
+        )
+        load_paths_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        load_paths_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
+        for upload_component in (source_image, mask_image, target_image):
+            upload_event = upload_component.upload(
+                show_upload_loading,
+                inputs=[],
+                outputs=[loading_panel],
+                queue=False,
+                show_progress="hidden",
+                js=SHOW_UPLOAD_LOADING_JS,
+            )
+            upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+            upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
+        source_image.change(
+            hide_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
         )
         center_button.click(center_position, inputs=[ts], outputs=[x, y])
-        preview_button.click(
+
+        preview_event = preview_button.click(
+            show_preview_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
+            js=SHOW_PREVIEW_LOADING_JS,
+        ).then(
             placement_preview,
             inputs=[source_image, source_path, mask_image, mask_path, target_image, target_path, ss, ts, x, y],
             outputs=[preview_image, mask_preview, x, y],
+            show_progress="full",
+            show_progress_on=[preview_image, mask_preview],
         )
-        run_button.click(
+        preview_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        preview_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
+        run_event = run_button.click(
+            show_edit_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
+            js=SHOW_EDIT_LOADING_JS,
+        ).then(
             runner,
             inputs=[
                 source_image,
@@ -466,11 +601,30 @@ def create_demo_blend(runner):
                 output_dir,
             ],
             outputs=[output, output_file, losses, status, x, y],
+            show_progress="full",
+            show_progress_on=[output, status],
         )
+        run_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        run_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
         clear_button.click(
             clear_demo,
             inputs=[],
-            outputs=[source_image, source_path, mask_image, mask_path, target_image, target_path, mask_preview, preview_image, output, output_file, losses, status],
+            outputs=[
+                source_image,
+                source_path,
+                mask_image,
+                mask_path,
+                target_image,
+                target_path,
+                mask_preview,
+                preview_image,
+                output,
+                output_file,
+                losses,
+                status,
+                loading_panel,
+            ],
         )
     return demo
 
