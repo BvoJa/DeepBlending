@@ -175,7 +175,12 @@ def make_source_draw_image(label):
             sources=["upload"],
             type="numpy",
             image_mode="RGBA",
-            brush=gr.Brush(default_size=35, colors=["#000000"], color_mode="fixed"),
+            brush=gr.Brush(
+                default_size=35,
+                colors=[("#ff7828", 0.35)],
+                default_color=("#ff7828", 0.35),
+                color_mode="fixed",
+            ),
             eraser=gr.Eraser(default_size=35),
             transforms=[],
         )
@@ -185,7 +190,12 @@ def make_source_draw_image(label):
         sources=["upload"],
         type="numpy",
         image_mode="RGBA",
-        brush=gr.Brush(default_size=35, colors=["rgba(255, 120, 40, 0.75)"], color_mode="fixed"),
+        brush=gr.Brush(
+            default_size=35,
+            colors=[("#ff7828", 0.35)],
+            default_color=("#ff7828", 0.35),
+            color_mode="fixed",
+        ),
         eraser=gr.Eraser(default_size=35),
         layers=True,
         transforms=[],
