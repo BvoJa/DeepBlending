@@ -31,15 +31,16 @@ DEFAULT_OUTPUT_DIR = "results/gradio"
 
 DESCRIPTION = """
 # Deep Image Blending
-Gradio demo for first-pass object blending. Upload source and target images, upload or draw the object mask, choose placement and loss weights, then click `Edit`.
+Gradio demo for first-pass object blending. Upload a source image, draw or upload its mask, upload a target image, choose placement and loss weights, then click `Edit`.
 """
 
 BLEND_DESCRIPTION = """
 ## First-Pass Object Blending
 Usage:
-- Upload source and target images using the same plain image-upload style as DragonDiffusion.
-- Upload a mask image, or draw over the object to create the mask.
-- Upload a target image, or paste a Kaggle/local file path to avoid slow browser upload.
+- Upload a source image and draw over the object to create the mask.
+- Or upload a mask image in the mask box.
+- Upload a target image using the same plain image-upload style as DragonDiffusion.
+- Optionally paste Kaggle/local file paths to avoid slow browser upload.
 - Adjust source size, target size, and object center.
 - Adjust the loss weights that contribute to the first-pass total loss.
 - Click `Preview Placement` to inspect the mask and location.
@@ -47,11 +48,11 @@ Usage:
 """
 
 examples_blend = [
-    ["data/1_source.png", "data/1_target.png", 300, 512, 200, 235],
-    ["data/2_source.png", "data/2_target.png", 300, 512, 200, 235],
-    ["data/3_source.png", "data/3_target.png", 300, 512, 200, 235],
-    ["data/4_source.png", "data/4_target.png", 300, 512, 200, 235],
-    ["data/5_source.png", "data/5_target.png", 300, 512, 200, 235],
+    ["data/1_source.png", "data/1_mask.png", "data/1_target.png", 300, 512, 200, 235],
+    ["data/2_source.png", "data/2_mask.png", "data/2_target.png", 300, 512, 200, 235],
+    ["data/3_source.png", "data/3_mask.png", "data/3_target.png", 300, 512, 200, 235],
+    ["data/4_source.png", "data/4_mask.png", "data/4_target.png", 300, 512, 200, 235],
+    ["data/5_source.png", "data/5_mask.png", "data/5_target.png", 300, 512, 200, 235],
 ]
 
 
@@ -77,7 +78,7 @@ def make_upload_image(label, image_mode="RGB"):
     return gr.Image(**kwargs)
 
 
-def make_source_mask_input(label):
+def make_source_draw_image(label):
     image_params = inspect.signature(gr.Image).parameters
     if "tool" in image_params:
         kwargs = {
@@ -92,6 +93,17 @@ def make_source_mask_input(label):
             kwargs["sources"] = ["upload"]
         return gr.Image(**kwargs)
 
+    if hasattr(gr, "ImageMask"):
+        return gr.ImageMask(
+            label=label,
+            sources=["upload"],
+            type="numpy",
+            image_mode="RGBA",
+            brush=gr.Brush(default_size=35, colors=["#000000"], color_mode="fixed"),
+            eraser=gr.Eraser(default_size=35),
+            transforms=[],
+        )
+
     return gr.ImageEditor(
         label=label,
         sources=["upload"],
@@ -102,12 +114,6 @@ def make_source_mask_input(label):
         layers=True,
         transforms=[],
     )
-
-
-def load_source_for_mask_editor(source_image):
-    if source_image is None:
-        return None
-    return to_rgb_array(source_image)
 
 
 def center_position(ts):
@@ -165,87 +171,102 @@ def resolve_target(target_image, target_path):
     return target_image
 
 
-def resolve_source_and_mask(source_image, mask_image, source_editor):
-    source = to_rgb_array(source_image)
-
-    uploaded_mask = to_mask_array(mask_image)
-    if uploaded_mask is not None:
-        if source is None:
-            source, _ = editor_to_source_and_mask(source_editor)
-        if source is None:
-            raise gr.Error("Upload a source image before using a mask image.")
-        return source, uploaded_mask
-
-    drawn_source, drawn_mask = editor_to_source_and_mask(source_editor)
-    if source is not None:
-        drawn_source = source
-    return drawn_source, drawn_mask
+def load_image_path(path, mode):
+    path = (path or "").strip()
+    if not path:
+        return None
+    if not os.path.exists(path):
+        raise gr.Error(f"Image path does not exist: {path}")
+    return np.array(Image.open(path).convert(mode))
 
 
-def editor_to_source_and_mask(source_editor):
-    if source_editor is None:
-        raise gr.Error("Upload a source image and draw the object mask first.")
+def load_images_from_paths(source_path, mask_path, target_path):
+    source = load_image_path(source_path, "RGB") if (source_path or "").strip() else gr.update()
+    mask = load_image_path(mask_path, "L") if (mask_path or "").strip() else gr.update()
+    target = load_image_path(target_path, "RGB") if (target_path or "").strip() else gr.update()
+    return source, mask, target
 
-    if not isinstance(source_editor, dict):
-        raise gr.Error("Use the source editor so the demo can read your drawn mask.")
 
-    if "image" in source_editor and "mask" in source_editor:
-        source = to_rgb_array(source_editor.get("image"))
-        raw_mask = source_editor.get("mask")
-        if source is None or raw_mask is None:
-            raise gr.Error("Upload a source image and draw the object mask first.")
+def extract_drawn_source_and_mask(source_image):
+    if source_image is None:
+        return None, None
 
-        raw_mask = np.asarray(raw_mask)
-        if raw_mask.ndim == 3 and raw_mask.shape[2] == 4:
-            mask = (raw_mask[:, :, 3] > 0).astype(np.uint8) * 255
-        elif raw_mask.ndim == 3:
-            mask = (np.any(raw_mask[:, :, :3] > 0, axis=2)).astype(np.uint8) * 255
-        else:
-            mask = (raw_mask > 0).astype(np.uint8) * 255
+    if not isinstance(source_image, dict):
+        return to_rgb_array(source_image), None
 
-        if mask.shape != source.shape[:2]:
-            mask = np.array(Image.fromarray(mask).resize(source.shape[:2][::-1]))
-        if mask.max() == 0:
-            raise gr.Error("Draw over the object in the source image before previewing or running.")
+    if "image" in source_image and "mask" in source_image:
+        source = to_rgb_array(source_image.get("image"))
+        mask = to_mask_array(source_image.get("mask"))
         return source, mask
 
-    source = source_editor.get("background")
-    if source is None:
-        source = source_editor.get("composite")
-    source = to_rgb_array(source)
-    if source is None:
-        raise gr.Error("Upload a source image before drawing the mask.")
+    background = source_image.get("background")
+    composite = source_image.get("composite")
+    source = to_rgb_array(background if background is not None else composite)
 
-    mask = np.zeros(source.shape[:2], dtype=np.uint8)
-    for layer in source_editor.get("layers") or []:
-        if layer is None:
-            continue
-        layer = to_rgba_array(layer)
-        if layer is None:
-            continue
-        if layer.ndim == 3 and layer.shape[2] == 4:
-            layer_mask = layer[:, :, 3] > 0
-        elif layer.ndim == 3:
-            layer_mask = np.any(layer[:, :, :3] > 0, axis=2)
-        else:
-            layer_mask = layer > 0
-        if layer_mask.shape != mask.shape:
-            layer_mask = np.array(Image.fromarray(layer_mask.astype(np.uint8) * 255).resize(mask.shape[::-1])) > 0
-        mask[layer_mask] = 255
-
-    if mask.max() == 0:
-        raise gr.Error("Draw over the object in the source image before previewing or running.")
+    mask = None
+    if source is not None:
+        mask = np.zeros(source.shape[:2], dtype=np.uint8)
+        for layer in source_image.get("layers") or []:
+            layer = to_rgba_array(layer)
+            if layer is None:
+                continue
+            if layer.ndim == 3 and layer.shape[2] == 4:
+                layer_mask = layer[:, :, 3] > 0
+            elif layer.ndim == 3:
+                layer_mask = np.any(layer[:, :, :3] > 0, axis=2)
+            else:
+                layer_mask = layer > 0
+            if layer_mask.shape != mask.shape:
+                layer_mask = np.array(Image.fromarray(layer_mask.astype(np.uint8) * 255).resize(mask.shape[::-1])) > 0
+            mask[layer_mask] = 255
+        if mask.max() == 0:
+            if background is not None and composite is not None:
+                background_rgb = to_rgb_array(background)
+                composite_rgb = to_rgb_array(composite)
+                if composite_rgb.shape[:2] != background_rgb.shape[:2]:
+                    composite_rgb = np.array(Image.fromarray(composite_rgb).resize(background_rgb.shape[1::-1]))
+                diff = np.max(
+                    np.abs(composite_rgb.astype(np.int16) - background_rgb.astype(np.int16)),
+                    axis=2,
+                )
+                mask = (diff > 8).astype(np.uint8) * 255
+            if mask is not None and mask.max() == 0:
+                mask = None
 
     return source, mask
 
 
-def placement_preview(source_image, source_editor, mask_image, target_image, target_path, ss, ts, x, y):
+def resolve_source_and_mask(source_image, mask_image, source_path="", mask_path=""):
+    source_from_path = load_image_path(source_path, "RGB")
+    drawn_source, drawn_mask = extract_drawn_source_and_mask(source_image)
+    source = source_from_path if source_from_path is not None else drawn_source
+    if source is None:
+        source = to_rgb_array(source_image)
+
+    mask_from_path = load_image_path(mask_path, "L")
+    uploaded_mask = to_mask_array(mask_from_path if mask_from_path is not None else mask_image)
+    if uploaded_mask is not None:
+        if source is None:
+            raise gr.Error("Upload a source image before using a mask image.")
+        return source, uploaded_mask
+
+    if drawn_mask is not None:
+        if source is None:
+            raise gr.Error("Upload a source image before drawing the mask.")
+        return source, drawn_mask
+
+    if source is None:
+        raise gr.Error("Upload a source image first.")
+    raise gr.Error("Draw over the object in the source image, or upload a mask image.")
+
+
+def placement_preview(source_image, source_path, mask_image, mask_path, target_image, target_path, ss, ts, x, y):
     ss = int(ss)
     ts = int(ts)
     x, y = fit_placement(x, y, ss, ts)
 
     target_image = resolve_target(target_image, target_path)
-    source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_editor)
+    source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, mask_path)
     source = Image.fromarray(source_image.astype(np.uint8)).convert("RGB").resize((ss, ss))
     target = Image.fromarray(to_rgb_array(target_image).astype(np.uint8)).convert("RGB").resize((ts, ts))
     mask = Image.fromarray(mask_image.astype(np.uint8)).convert("L").resize((ss, ss))
@@ -271,8 +292,9 @@ def placement_preview(source_image, source_editor, mask_image, target_image, tar
 
 def run_first_pass(
     source_image,
-    source_editor,
+    source_path,
     mask_image,
+    mask_path,
     target_image,
     target_path,
     ss,
@@ -289,7 +311,7 @@ def run_first_pass(
     output_dir,
 ):
     target_image = resolve_target(target_image, target_path)
-    source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_editor)
+    source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, mask_path)
     ss = int(ss)
     ts = int(ts)
     x, y = fit_placement(x, y, ss, ts)
@@ -320,7 +342,7 @@ def run_first_pass(
 
 
 def clear_demo():
-    return None, None, None, None, "", None, None, None, None, {}, ""
+    return None, "", None, "", None, "", None, None, None, None, {}, ""
 
 
 def create_demo_blend(runner):
@@ -330,12 +352,19 @@ def create_demo_blend(runner):
             with gr.Column():
                 with gr.Group():
                     gr.Markdown("# INPUT")
-                    gr.Markdown("## 1. Upload source image")
-                    source_image = make_upload_image("Source image")
+                    gr.Markdown("## 1. Upload source image and draw object mask")
+                    source_image = make_source_draw_image("Source image")
+                    source_path = gr.Textbox(
+                        label="Fast source path on Kaggle/local machine",
+                        placeholder="/kaggle/input/your-dataset/source.jpg",
+                    )
 
-                    gr.Markdown("## 2. Upload or draw object mask")
+                    gr.Markdown("## 2. Optional mask upload")
                     mask_image = make_upload_image("Mask image", image_mode="L")
-                    source_editor = make_source_mask_input("Draw mask on source image")
+                    mask_path = gr.Textbox(
+                        label="Fast mask path on Kaggle/local machine",
+                        placeholder="/kaggle/input/your-dataset/mask.png",
+                    )
 
                     gr.Markdown("## 3. Upload target image")
                     target_image = make_upload_image("Target image")
@@ -343,6 +372,7 @@ def create_demo_blend(runner):
                         label="Fast target path on Kaggle/local machine",
                         placeholder="/kaggle/input/your-dataset/target.jpg",
                     )
+                    load_paths_button = gr.Button("Load Images From Paths")
 
                     gr.Markdown("## 4. Position and size")
                     with gr.Row():
@@ -384,7 +414,7 @@ def create_demo_blend(runner):
                 with gr.Group():
                     gr.Markdown("# OUTPUT")
                     with gr.Row():
-                        mask_preview = gr.Image(label="Drawn mask", type="numpy", image_mode="L")
+                        mask_preview = gr.Image(label="Active mask", type="numpy", image_mode="L")
                         preview_image = gr.Image(label="Placement preview", type="numpy")
 
                     gr.Markdown("<h5><center>Results</center></h5>")
@@ -399,22 +429,27 @@ def create_demo_blend(runner):
             gr.Markdown("Try some of the examples below ⬇️")
             gr.Examples(
                 examples=examples_blend,
-                inputs=[source_image, target_image, ss, ts, x, y],
+                inputs=[source_image, mask_image, target_image, ss, ts, x, y],
             )
 
-        source_image.change(load_source_for_mask_editor, inputs=[source_image], outputs=[source_editor])
+        load_paths_button.click(
+            load_images_from_paths,
+            inputs=[source_path, mask_path, target_path],
+            outputs=[source_image, mask_image, target_image],
+        )
         center_button.click(center_position, inputs=[ts], outputs=[x, y])
         preview_button.click(
             placement_preview,
-            inputs=[source_image, source_editor, mask_image, target_image, target_path, ss, ts, x, y],
+            inputs=[source_image, source_path, mask_image, mask_path, target_image, target_path, ss, ts, x, y],
             outputs=[preview_image, mask_preview, x, y],
         )
         run_button.click(
             runner,
             inputs=[
                 source_image,
-                source_editor,
+                source_path,
                 mask_image,
+                mask_path,
                 target_image,
                 target_path,
                 ss,
@@ -435,7 +470,7 @@ def create_demo_blend(runner):
         clear_button.click(
             clear_demo,
             inputs=[],
-            outputs=[source_image, source_editor, mask_image, target_image, target_path, mask_preview, preview_image, output, output_file, losses, status],
+            outputs=[source_image, source_path, mask_image, mask_path, target_image, target_path, mask_preview, preview_image, output, output_file, losses, status],
         )
     return demo
 
