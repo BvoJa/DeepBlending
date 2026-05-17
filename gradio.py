@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from my_run import first_pass_blend
 
@@ -73,10 +73,12 @@ INSTALL_LOADING_JS = """
 SHOW_UPLOAD_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Preparing uploaded image...'); return []; }"
 SHOW_PREVIEW_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Creating placement preview...'); return []; }"
 SHOW_EDIT_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Running first-pass blending...'); return []; }"
+SHOW_SAM_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Extracting mask with SAM...'); return []; }"
+SAM_MODEL_CACHE = {}
 
 DESCRIPTION = """
 # Deep Image Blending
-Gradio demo for first-pass object blending. Upload a source image, draw or upload its mask, upload a target image, choose placement and loss weights, then click `Edit`.
+Gradio demo for first-pass object blending. Upload a source image, draw, upload, or extract its mask with SAM, upload a target image, choose placement and loss weights, then click `Edit`.
 """
 
 BLEND_DESCRIPTION = """
@@ -84,6 +86,7 @@ BLEND_DESCRIPTION = """
 Usage:
 - Upload a source image and draw over the object to create the mask.
 - Or upload a mask image in the mask box.
+- Or use SAM mask extraction and click two box corners around the object.
 - Upload a target image using the same plain image-upload style as DragonDiffusion.
 - Optionally paste Kaggle/local file paths to avoid slow browser upload.
 - Adjust source size, target size, and object center.
@@ -130,6 +133,72 @@ def show_upload_loading():
 
 def hide_loading():
     return gr.update(value=loading_panel_html())
+
+
+def default_sam_checkpoint_path():
+    candidates = [
+        os.environ.get("EFFICIENT_SAM_CHECKPOINT"),
+        Path(__file__).resolve().parent / "models" / "efficient_sam_vits.pt",
+        Path("/home/bvoja/Documents/DragonDiffusion/models/efficient_sam_vits.pt"),
+        Path("/kaggle/input/efficient-sam/efficient_sam_vits.pt"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return str(path)
+    return "models/efficient_sam_vits.pt"
+
+
+def resolve_sam_checkpoint(checkpoint_path):
+    raw_path = (checkpoint_path or default_sam_checkpoint_path()).strip()
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / path
+    if not path.exists():
+        raise gr.Error(
+            "EfficientSAM checkpoint was not found. Put efficient_sam_vits.pt at "
+            f"{path}, or set the checkpoint path in the SAM options."
+        )
+    return str(path.resolve())
+
+
+def resolve_sam_device(gpu_id):
+    import torch
+
+    value = str(gpu_id or "auto").strip().lower()
+    if value == "auto":
+        return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    if value == "cpu":
+        return torch.device("cpu")
+    if value.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise gr.Error("CUDA was selected for SAM, but CUDA is not available.")
+        return torch.device(value)
+    if value.isdigit():
+        return torch.device(f"cuda:{value}" if torch.cuda.is_available() else "cpu")
+    return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+def get_sam_model(checkpoint_path, gpu_id):
+    import torch
+    from sam.efficient_sam.efficient_sam import build_efficient_sam
+
+    checkpoint = resolve_sam_checkpoint(checkpoint_path)
+    device = resolve_sam_device(gpu_id)
+    cache_key = (checkpoint, str(device))
+    if cache_key not in SAM_MODEL_CACHE:
+        model = build_efficient_sam(
+            encoder_patch_embed_dim=384,
+            encoder_num_heads=6,
+            checkpoint=checkpoint,
+        )
+        model.eval().to(device)
+        SAM_MODEL_CACHE[cache_key] = model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    return SAM_MODEL_CACHE[cache_key], device
 
 
 def load_css():
@@ -346,6 +415,134 @@ def resolve_source_and_mask(source_image, mask_image, source_path="", mask_path=
     raise gr.Error("Draw over the object in the source image, or upload a mask image.")
 
 
+def resolve_source_for_sam(source_image, source_path="", fallback_image=None):
+    source_from_path = load_image_path(source_path, "RGB")
+    if source_from_path is not None:
+        return source_from_path.astype(np.uint8)
+
+    drawn_source, _ = extract_drawn_source_and_mask(source_image)
+    if drawn_source is not None:
+        return drawn_source.astype(np.uint8)
+
+    source = to_rgb_array(fallback_image)
+    if source is not None:
+        return source.astype(np.uint8)
+
+    raise gr.Error("Upload a source image before using SAM mask extraction.")
+
+
+def normalize_box_points(points):
+    if len(points) < 2:
+        return points
+    x1, y1 = points[0]
+    x2, y2 = points[1]
+    left = min(int(x1), int(x2))
+    right = max(int(x1), int(x2))
+    top = min(int(y1), int(y2))
+    bottom = max(int(y1), int(y2))
+    return [[left, top], [right, bottom]]
+
+
+def overlay_mask(image, mask, color=(255, 120, 40), alpha=0.42):
+    output = image.astype(np.float32).copy()
+    mask_bool = mask > 0
+    if np.any(mask_bool):
+        output[mask_bool] = output[mask_bool] * (1 - alpha) + np.array(color, dtype=np.float32) * alpha
+    return np.clip(output, 0, 255).astype(np.uint8)
+
+
+def draw_sam_prompts(image, points, mask=None):
+    canvas = image.astype(np.uint8).copy()
+    if mask is not None:
+        canvas = overlay_mask(canvas, mask)
+
+    pil_image = Image.fromarray(canvas).convert("RGB")
+    draw = ImageDraw.Draw(pil_image)
+    for point in points[:2]:
+        x, y = int(point[0]), int(point[1])
+        radius = 8
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(255, 0, 0), outline=(255, 255, 255), width=2)
+
+    if len(points) >= 2:
+        (x1, y1), (x2, y2) = normalize_box_points(points)
+        draw.rectangle((x1, y1, x2, y2), outline=(255, 0, 0), width=3)
+
+    return np.array(pil_image)
+
+
+def load_source_for_sam(source_image, source_path):
+    source = resolve_source_for_sam(source_image, source_path)
+    return source, source, [], [], "Source loaded for SAM. Click two opposite corners around the object."
+
+
+def store_sam_uploaded_image(sam_image):
+    source = to_rgb_array(sam_image)
+    if source is None:
+        return None, [], [], "Upload an image for SAM, or load the current source."
+    return source.astype(np.uint8), [], [], "SAM image loaded. Click two opposite corners around the object."
+
+
+def clear_sam_selection(sam_original_source):
+    source = to_rgb_array(sam_original_source)
+    return source, source, [], [], "SAM selection cleared."
+
+
+def segment_source_with_sam(
+    sam_image,
+    sam_original_source,
+    source_image,
+    source_path,
+    sam_points,
+    sam_point_labels,
+    sam_checkpoint_path,
+    gpu_id,
+    evt: gr.SelectData,
+):
+    import torch
+    from torchvision import transforms
+
+    original = to_rgb_array(sam_original_source)
+    if original is None:
+        original = resolve_source_for_sam(source_image, source_path, sam_image)
+    original = original.astype(np.uint8)
+
+    points = [list(point) for point in (sam_points or [])]
+    point_labels = list(sam_point_labels or [])
+    x, y = int(evt.index[0]), int(evt.index[1])
+    if len(points) >= 2:
+        points = []
+        point_labels = []
+
+    points.append([x, y])
+    point_labels.append(2 if len(points) == 1 else 3)
+
+    if len(points) == 1:
+        annotated = draw_sam_prompts(original, points)
+        return annotated, original, gr.update(), gr.update(), points, point_labels, "First SAM corner selected. Click the opposite corner."
+
+    points = normalize_box_points(points)
+    point_labels = [2, 3]
+    model, device = get_sam_model(sam_checkpoint_path, gpu_id)
+    input_points = np.array(points, dtype=np.float32)
+    input_labels = np.array(point_labels, dtype=np.int64)
+    pts_sampled = torch.reshape(torch.tensor(input_points, device=device), [1, 1, -1, 2])
+    pts_labels = torch.reshape(torch.tensor(input_labels, device=device), [1, 1, -1])
+    img_tensor = transforms.ToTensor()(original).to(device)
+
+    with torch.no_grad():
+        predicted_logits, predicted_iou = model(
+            img_tensor[None, ...],
+            pts_sampled,
+            pts_labels,
+        )
+    mask = torch.ge(predicted_logits[0, 0, 0, :, :], 0).float().cpu().numpy()
+    mask_image = (mask * 255).astype(np.uint8)
+    annotated = draw_sam_prompts(original, points, mask_image)
+    best_iou = float(predicted_iou[0, 0, 0].detach().cpu())
+    status = f"SAM mask extracted. Estimated IoU: {best_iou:.3f}"
+    return annotated, original, mask_image, mask_image, points, point_labels, status
+
+
 def placement_preview(source_image, source_path, mask_image, mask_path, target_image, target_path, ss, ts, x, y):
     ss = int(ss)
     ts = int(ts)
@@ -428,11 +625,15 @@ def run_first_pass(
 
 
 def clear_demo():
-    return None, "", None, "", None, "", None, None, None, None, {}, "", loading_panel_html()
+    return None, "", None, "", None, "", None, None, [], [], None, None, None, None, {}, "", loading_panel_html()
 
 
 def create_demo_blend(runner):
     with gr.Blocks() as demo:
+        sam_original_source = gr.State(value=None)
+        sam_points = gr.State([])
+        sam_point_labels = gr.State([])
+
         gr.Markdown(BLEND_DESCRIPTION)
         with gr.Row():
             with gr.Column():
@@ -451,6 +652,16 @@ def create_demo_blend(runner):
                         label="Fast mask path on Kaggle/local machine",
                         placeholder="/kaggle/input/your-dataset/mask.png",
                     )
+                    with gr.Accordion("SAM mask extraction", open=False):
+                        with gr.Row():
+                            load_sam_source_button = gr.Button("Use Source For SAM")
+                            clear_sam_button = gr.Button("Clear SAM Box")
+                        sam_selector = make_upload_image("SAM box selector")
+                        sam_checkpoint_path = gr.Textbox(
+                            value=default_sam_checkpoint_path(),
+                            label="EfficientSAM checkpoint",
+                            placeholder="models/efficient_sam_vits.pt",
+                        )
 
                     gr.Markdown("## 3. Upload target image")
                     target_image = make_upload_image("Target image")
@@ -543,6 +754,23 @@ def create_demo_blend(runner):
         load_paths_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
         load_paths_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
 
+        load_sam_source_event = load_sam_source_button.click(
+            show_upload_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
+            js=SHOW_UPLOAD_LOADING_JS,
+        ).then(
+            load_source_for_sam,
+            inputs=[source_image, source_path],
+            outputs=[sam_selector, sam_original_source, sam_points, sam_point_labels, status],
+            show_progress="full",
+            show_progress_on=[sam_selector],
+        )
+        load_sam_source_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        load_sam_source_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
         for upload_component in (source_image, mask_image, target_image):
             upload_event = upload_component.upload(
                 show_upload_loading,
@@ -555,6 +783,23 @@ def create_demo_blend(runner):
             upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
             upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
 
+        sam_upload_event = sam_selector.upload(
+            show_upload_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
+            js=SHOW_UPLOAD_LOADING_JS,
+        ).then(
+            store_sam_uploaded_image,
+            inputs=[sam_selector],
+            outputs=[sam_original_source, sam_points, sam_point_labels, status],
+            queue=False,
+            show_progress="hidden",
+        )
+        sam_upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        sam_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
         source_image.change(
             hide_loading,
             inputs=[],
@@ -563,6 +808,40 @@ def create_demo_blend(runner):
             show_progress="hidden",
         )
         center_button.click(center_position, inputs=[ts], outputs=[x, y])
+
+        sam_select_event = sam_selector.select(
+            segment_source_with_sam,
+            inputs=[
+                sam_selector,
+                sam_original_source,
+                source_image,
+                source_path,
+                sam_points,
+                sam_point_labels,
+                sam_checkpoint_path,
+                gpu_id,
+            ],
+            outputs=[
+                sam_selector,
+                sam_original_source,
+                mask_image,
+                mask_preview,
+                sam_points,
+                sam_point_labels,
+                status,
+            ],
+            show_progress="full",
+            show_progress_on=[sam_selector, mask_preview],
+            js=SHOW_SAM_LOADING_JS,
+        )
+        sam_select_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        sam_select_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
+        clear_sam_button.click(
+            clear_sam_selection,
+            inputs=[sam_original_source],
+            outputs=[sam_selector, sam_original_source, sam_points, sam_point_labels, status],
+        )
 
         preview_event = preview_button.click(
             show_preview_loading,
@@ -627,6 +906,10 @@ def create_demo_blend(runner):
                 mask_path,
                 target_image,
                 target_path,
+                sam_selector,
+                sam_original_source,
+                sam_points,
+                sam_point_labels,
                 mask_preview,
                 preview_image,
                 output,
