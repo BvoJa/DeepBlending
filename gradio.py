@@ -92,9 +92,8 @@ Gradio demo for first-pass object blending. Upload a source image, draw, upload,
 BLEND_DESCRIPTION = """
 ## First-Pass Object Blending
 Usage:
-- Upload a source image and draw over the object to create the mask.
+- Upload a source image and click two opposite box corners to extract the object mask with SAM.
 - Or upload a mask image in the mask box.
-- Or use SAM mask extraction and click two box corners around the object.
 - Upload a target image using the same plain image-upload style as DragonDiffusion.
 - Optionally paste Kaggle/local file paths to avoid slow browser upload.
 - Adjust source size, target size, and object center.
@@ -740,8 +739,8 @@ def create_demo_blend(runner):
             with gr.Column():
                 with gr.Group():
                     gr.Markdown("# INPUT")
-                    gr.Markdown("## 1. Upload source image and draw object mask")
-                    source_image = make_source_draw_image("Source image")
+                    gr.Markdown("## 1. Upload source image and click object box for SAM")
+                    source_image = make_upload_image("Source image")
                     source_path = gr.Textbox(
                         label="Fast source path on Kaggle/local machine",
                         placeholder="/kaggle/input/your-dataset/source.jpg",
