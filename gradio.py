@@ -103,11 +103,11 @@ Usage:
 """
 
 examples_blend = [
-    ["data/1_source.png", "data/1_mask.png", "data/1_target.png", 300, 512, 200, 235],
-    ["data/2_source.png", "data/2_mask.png", "data/2_target.png", 300, 512, 200, 235],
-    ["data/3_source.png", "data/3_mask.png", "data/3_target.png", 300, 512, 200, 235],
-    ["data/4_source.png", "data/4_mask.png", "data/4_target.png", 300, 512, 200, 235],
-    ["data/5_source.png", "data/5_mask.png", "data/5_target.png", 300, 512, 200, 235],
+    ["data/1_source.png", "data/1_mask.png", "data/1_target.png", 512, 512, 256, 256],
+    ["data/2_source.png", "data/2_mask.png", "data/2_target.png", 512, 512, 256, 256],
+    ["data/3_source.png", "data/3_mask.png", "data/3_target.png", 512, 512, 256, 256],
+    ["data/4_source.png", "data/4_mask.png", "data/4_target.png", 512, 512, 256, 256],
+    ["data/5_source.png", "data/5_mask.png", "data/5_target.png", 512, 512, 256, 256],
 ]
 
 
@@ -778,7 +778,7 @@ def create_demo_blend(runner):
 
                     gr.Markdown("## 4. Position and size")
                     with gr.Row():
-                        ss = gr.Slider(64, 768, value=300, step=1, label="Object canvas size (--ss)")
+                        ss = gr.Slider(64, 768, value=512, step=1, label="Object canvas size (--ss)")
                         ts = gr.Slider(128, 1024, value=512, step=1, label="Target size (--ts)")
                     mask_scale = gr.Slider(
                         0.2,
@@ -788,8 +788,8 @@ def create_demo_blend(runner):
                         label="Object/mask scale (--mask_scale)",
                     )
                     with gr.Row():
-                        x = gr.Slider(0, 1024, value=200, step=1, label="Vertical center (--x)")
-                        y = gr.Slider(0, 1024, value=235, step=1, label="Horizontal center (--y)")
+                        x = gr.Slider(0, 1024, value=256, step=1, label="Vertical center (--x)")
+                        y = gr.Slider(0, 1024, value=256, step=1, label="Horizontal center (--y)")
 
                     with gr.Row():
                         center_button = gr.Button("Use Target Center")
