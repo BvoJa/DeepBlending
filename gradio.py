@@ -648,11 +648,12 @@ def placement_preview(source_image, source_path, source_original_image, mask_ima
     x, y = fit_placement(x, y, ss, ts)
 
     target_image = resolve_target(target_image, target_path)
-    source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path)
-    source_image, mask_image = prepare_source_object(source_image, mask_image, ss, mask_scale)
+    source_input, mask_input = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path)
+    source_image, prepared_mask = prepare_source_object(source_input, mask_input, ss, mask_scale)
     source = Image.fromarray(source_image.astype(np.uint8)).convert("RGB")
     target = Image.fromarray(to_rgb_array(target_image).astype(np.uint8)).convert("RGB").resize((ts, ts))
-    mask = Image.fromarray((mask_image * 255).astype(np.uint8)).convert("L")
+    mask = Image.fromarray((prepared_mask * 255).astype(np.uint8)).convert("L")
+    mask_display = to_mask_array(mask_input)
 
     source_np = np.array(source).astype(np.float32)
     target_np = np.array(target).astype(np.float32)
@@ -670,7 +671,7 @@ def placement_preview(source_image, source_path, source_original_image, mask_ima
     preview_region = preview[top: top + ss, left: left + ss]
     preview_region[outline] = preview_region[outline] * 0.65 + np.array([255, 80, 40]) * 0.35
 
-    return np.clip(preview, 0, 255).astype(np.uint8), (mask_np * 255).astype(np.uint8), x, y
+    return np.clip(preview, 0, 255).astype(np.uint8), mask_display, x, y
 
 
 def run_first_pass(

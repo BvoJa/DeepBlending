@@ -7,8 +7,6 @@ import torch
 import torch.optim as optim
 from PIL import Image
 from skimage.io import imsave
-from skimage.measure import label
-from skimage.morphology import binary_closing, binary_opening, disk, remove_small_holes, remove_small_objects
 
 from utils import (
     MeanShift,
@@ -16,7 +14,6 @@ from utils import (
     compute_gt_gradient,
     gram_matrix,
     laplacian_filter_tensor,
-    make_canvas_mask,
     numpy2tensor,
 )
 
@@ -73,26 +70,6 @@ def load_mask_image(image, size):
     return load_mask_array(image, (size, size))
 
 
-def clean_binary_mask(mask):
-    mask_bool = mask > 0
-    if not np.any(mask_bool):
-        return mask.astype(np.uint8)
-
-    labels = label(mask_bool)
-    if labels.max() > 0:
-        counts = np.bincount(labels.ravel())
-        counts[0] = 0
-        mask_bool = labels == counts.argmax()
-
-    min_size = max(16, int(mask_bool.size * 0.00015))
-    hole_size = max(64, int(mask_bool.size * 0.002))
-    mask_bool = remove_small_objects(mask_bool, min_size=min_size)
-    mask_bool = remove_small_holes(mask_bool, area_threshold=hole_size)
-    mask_bool = binary_closing(mask_bool, disk(1))
-    mask_bool = binary_opening(mask_bool, disk(1))
-    return mask_bool.astype(np.uint8)
-
-
 def mask_bbox(mask):
     ys, xs = np.where(mask > 0)
     if len(xs) == 0 or len(ys) == 0:
@@ -129,38 +106,61 @@ def paste_center(canvas, image):
     return canvas
 
 
-def prepare_source_object(source_image, mask_image, size, mask_scale=1.0):
-    source = load_rgb_array(source_image)
-    mask = load_mask_array(mask_image)
+def fit_to_square_canvas(source, mask, size):
     source_h, source_w = source.shape[:2]
-    if mask.shape[:2] != (source_h, source_w):
-        mask = load_mask_array(mask_image, (source_w, source_h))
-    mask = clean_binary_mask(mask)
+    ratio = min(size / max(1, source_w), size / max(1, source_h))
+    resized_w = max(1, int(round(source_w * ratio)))
+    resized_h = max(1, int(round(source_h * ratio)))
 
-    box = mask_bbox(mask)
-    if box is None:
-        raise ValueError("The mask is empty. Draw, extract, or upload a non-empty object mask.")
-
-    box = expand_bbox(box, source_w, source_h)
-    left, top, right, bottom = box
-    source_crop = source[top:bottom, left:right]
-    mask_crop = clean_binary_mask(mask[top:bottom, left:right])
-    crop_h, crop_w = mask_crop.shape[:2]
-    long_side = max(crop_h, crop_w)
-    scaled_long_side = max(1, int(round(size * float(mask_scale))))
-    resize_ratio = scaled_long_side / max(1, long_side)
-    resized_w = max(1, int(round(crop_w * resize_ratio)))
-    resized_h = max(1, int(round(crop_h * resize_ratio)))
-
-    source_resized = np.array(Image.fromarray(source_crop).resize((resized_w, resized_h), Image.LANCZOS))
-    mask_resized = np.array(Image.fromarray(mask_crop * 255).resize((resized_w, resized_h), Image.BILINEAR))
-    mask_resized = clean_binary_mask((mask_resized >= 128).astype(np.uint8))
+    source_resized = np.array(Image.fromarray(source).resize((resized_w, resized_h), Image.LANCZOS))
+    mask_resized = np.array(Image.fromarray(mask * 255).resize((resized_w, resized_h), Image.NEAREST))
+    mask_resized = (mask_resized > 0).astype(np.uint8)
 
     source_canvas = np.zeros((size, size, 3), dtype=np.uint8)
     mask_canvas = np.zeros((size, size), dtype=np.uint8)
     paste_center(source_canvas, source_resized)
     paste_center(mask_canvas, mask_resized)
     return source_canvas, mask_canvas
+
+
+def scale_canvas_pair(source_canvas, mask_canvas, mask_scale=1.0):
+    scale = float(mask_scale)
+    size = source_canvas.shape[0]
+    if abs(scale - 1.0) < 1e-6:
+        return source_canvas, mask_canvas
+
+    scaled_size = max(1, int(round(size * scale)))
+    source_resized = np.array(Image.fromarray(source_canvas).resize((scaled_size, scaled_size), Image.LANCZOS))
+    mask_resized = np.array(Image.fromarray(mask_canvas * 255).resize((scaled_size, scaled_size), Image.NEAREST))
+    mask_resized = (mask_resized > 0).astype(np.uint8)
+
+    source_scaled = np.zeros_like(source_canvas)
+    mask_scaled = np.zeros_like(mask_canvas)
+    paste_center(source_scaled, source_resized)
+    paste_center(mask_scaled, mask_resized)
+    return source_scaled, mask_scaled
+
+
+def prepare_source_object(source_image, mask_image, size, mask_scale=1.0):
+    source = load_rgb_array(source_image)
+    mask = load_mask_array(mask_image)
+    source_h, source_w = source.shape[:2]
+    if mask.shape[:2] != (source_h, source_w):
+        mask = load_mask_array(mask_image, (source_w, source_h))
+
+    if mask_bbox(mask) is None:
+        raise ValueError("The mask is empty. Draw, extract, or upload a non-empty object mask.")
+
+    source_canvas, mask_canvas = fit_to_square_canvas(source, mask, size)
+    return scale_canvas_pair(source_canvas, mask_canvas, mask_scale)
+
+
+def paste_source_mask_to_target(x_start, y_start, target_img, mask):
+    canvas_mask = np.zeros(target_img.shape[:2], dtype=mask.dtype)
+    top = int(x_start - mask.shape[0] * 0.5)
+    left = int(y_start - mask.shape[1] * 0.5)
+    canvas_mask[top:top + mask.shape[0], left:left + mask.shape[1]] = mask
+    return canvas_mask
 
 
 def prepare_full_source_and_mask(source_image, mask_image, size):
@@ -215,7 +215,7 @@ def first_pass_blend(
     source_img, mask_img = prepare_source_object(source_image, mask_image, ss, mask_scale)
     target_img = load_rgb_image(target_image, ts)
 
-    canvas_mask = make_canvas_mask(x, y, target_img, mask_img)
+    canvas_mask = paste_source_mask_to_target(x, y, target_img, mask_img)
     canvas_mask = numpy2tensor(canvas_mask, device)
     canvas_mask = canvas_mask.squeeze(0).repeat(3, 1).view(3, ts, ts).unsqueeze(0)
 
