@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from my_run import first_pass_blend
+from my_run import first_pass_blend, prepare_source_object
 
 
 def import_gradio_package():
@@ -96,7 +96,7 @@ Usage:
 - Or upload a mask image in the mask box.
 - Upload a target image using the same plain image-upload style as DragonDiffusion.
 - Optionally paste Kaggle/local file paths to avoid slow browser upload.
-- Adjust source size, target size, and object center.
+- Adjust object canvas size, object/mask scale, target size, and object center.
 - Adjust the loss weights that contribute to the first-pass total loss.
 - Click `Preview Placement` to inspect the mask and location.
 - Click `Edit` to run first-pass image blending.
@@ -642,16 +642,17 @@ def segment_source_image_clicks_with_sam(
     )
 
 
-def placement_preview(source_image, source_path, source_original_image, mask_image, mask_path, target_image, target_path, ss, ts, x, y):
+def placement_preview(source_image, source_path, source_original_image, mask_image, mask_path, target_image, target_path, ss, ts, mask_scale, x, y):
     ss = int(ss)
     ts = int(ts)
     x, y = fit_placement(x, y, ss, ts)
 
     target_image = resolve_target(target_image, target_path)
     source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path)
-    source = Image.fromarray(source_image.astype(np.uint8)).convert("RGB").resize((ss, ss))
+    source_image, mask_image = prepare_source_object(source_image, mask_image, ss, mask_scale)
+    source = Image.fromarray(source_image.astype(np.uint8)).convert("RGB")
     target = Image.fromarray(to_rgb_array(target_image).astype(np.uint8)).convert("RGB").resize((ts, ts))
-    mask = Image.fromarray(mask_image.astype(np.uint8)).convert("L").resize((ss, ss))
+    mask = Image.fromarray((mask_image * 255).astype(np.uint8)).convert("L")
 
     source_np = np.array(source).astype(np.float32)
     target_np = np.array(target).astype(np.float32)
@@ -682,6 +683,7 @@ def run_first_pass(
     target_path,
     ss,
     ts,
+    mask_scale,
     x,
     y,
     gpu_id,
@@ -715,6 +717,7 @@ def run_first_pass(
         style_weight=float(style_weight),
         content_weight=float(content_weight),
         tv_weight=float(tv_weight),
+        mask_scale=float(mask_scale),
         seed=seed_value,
         progress_interval=max(1, int(num_steps) // 20),
     )
@@ -775,8 +778,15 @@ def create_demo_blend(runner):
 
                     gr.Markdown("## 4. Position and size")
                     with gr.Row():
-                        ss = gr.Slider(64, 768, value=300, step=1, label="Source size (--ss)")
+                        ss = gr.Slider(64, 768, value=300, step=1, label="Object canvas size (--ss)")
                         ts = gr.Slider(128, 1024, value=512, step=1, label="Target size (--ts)")
+                    mask_scale = gr.Slider(
+                        0.2,
+                        1.5,
+                        value=1.0,
+                        step=0.01,
+                        label="Object/mask scale (--mask_scale)",
+                    )
                     with gr.Row():
                         x = gr.Slider(0, 1024, value=200, step=1, label="Vertical center (--x)")
                         y = gr.Slider(0, 1024, value=235, step=1, label="Horizontal center (--y)")
@@ -936,7 +946,7 @@ def create_demo_blend(runner):
             js=SHOW_PREVIEW_LOADING_JS,
         ).then(
             placement_preview,
-            inputs=[source_image, source_path, source_original_image, mask_image, mask_path, target_image, target_path, ss, ts, x, y],
+            inputs=[source_image, source_path, source_original_image, mask_image, mask_path, target_image, target_path, ss, ts, mask_scale, x, y],
             outputs=[preview_image, mask_preview, x, y],
             show_progress="full",
             show_progress_on=[preview_image, mask_preview],
@@ -963,6 +973,7 @@ def create_demo_blend(runner):
                 target_path,
                 ss,
                 ts,
+                mask_scale,
                 x,
                 y,
                 gpu_id,

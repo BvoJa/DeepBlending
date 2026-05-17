@@ -43,7 +43,15 @@ def load_rgb_image(image, size):
     return np.array(pil_image.convert("RGB").resize((size, size)))
 
 
-def load_mask_image(image, size):
+def load_rgb_array(image):
+    if isinstance(image, np.ndarray):
+        pil_image = Image.fromarray(image.astype(np.uint8))
+    else:
+        pil_image = Image.open(image)
+    return np.array(pil_image.convert("RGB"))
+
+
+def load_mask_array(image, size=None):
     if isinstance(image, np.ndarray):
         if image.ndim == 3:
             pil_image = Image.fromarray(image.astype(np.uint8)).convert("L")
@@ -51,9 +59,91 @@ def load_mask_image(image, size):
             pil_image = Image.fromarray(image.astype(np.uint8))
     else:
         pil_image = Image.open(image)
-    mask = np.array(pil_image.convert("L").resize((size, size)))
+    pil_image = pil_image.convert("L")
+    if size is not None:
+        pil_image = pil_image.resize(size, Image.NEAREST)
+    mask = np.array(pil_image)
     mask[mask > 0] = 1
-    return mask
+    return mask.astype(np.uint8)
+
+
+def load_mask_image(image, size):
+    return load_mask_array(image, (size, size))
+
+
+def mask_bbox(mask):
+    ys, xs = np.where(mask > 0)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def expand_bbox(box, width, height, padding_ratio=0.04):
+    left, top, right, bottom = box
+    pad = int(round(max(right - left, bottom - top) * padding_ratio))
+    return (
+        max(0, left - pad),
+        max(0, top - pad),
+        min(width, right + pad),
+        min(height, bottom + pad),
+    )
+
+
+def paste_center(canvas, image):
+    canvas_h, canvas_w = canvas.shape[:2]
+    image_h, image_w = image.shape[:2]
+    top = (canvas_h - image_h) // 2
+    left = (canvas_w - image_w) // 2
+    dst_top = max(0, top)
+    dst_left = max(0, left)
+    dst_bottom = min(canvas_h, top + image_h)
+    dst_right = min(canvas_w, left + image_w)
+    src_top = max(0, -top)
+    src_left = max(0, -left)
+    src_bottom = src_top + (dst_bottom - dst_top)
+    src_right = src_left + (dst_right - dst_left)
+    if dst_bottom > dst_top and dst_right > dst_left:
+        canvas[dst_top:dst_bottom, dst_left:dst_right] = image[src_top:src_bottom, src_left:src_right]
+    return canvas
+
+
+def prepare_source_object(source_image, mask_image, size, mask_scale=1.0):
+    source = load_rgb_array(source_image)
+    mask = load_mask_array(mask_image)
+    source_h, source_w = source.shape[:2]
+    if mask.shape[:2] != (source_h, source_w):
+        mask = load_mask_array(mask_image, (source_w, source_h))
+
+    box = mask_bbox(mask)
+    if box is None:
+        raise ValueError("The mask is empty. Draw, extract, or upload a non-empty object mask.")
+
+    box = expand_bbox(box, source_w, source_h)
+    left, top, right, bottom = box
+    source_crop = source[top:bottom, left:right]
+    mask_crop = mask[top:bottom, left:right]
+    crop_h, crop_w = mask_crop.shape[:2]
+    long_side = max(crop_h, crop_w)
+    scaled_long_side = max(1, int(round(size * float(mask_scale))))
+    resize_ratio = scaled_long_side / max(1, long_side)
+    resized_w = max(1, int(round(crop_w * resize_ratio)))
+    resized_h = max(1, int(round(crop_h * resize_ratio)))
+
+    source_resized = np.array(Image.fromarray(source_crop).resize((resized_w, resized_h), Image.LANCZOS))
+    mask_resized = np.array(Image.fromarray(mask_crop * 255).resize((resized_w, resized_h), Image.NEAREST))
+    mask_resized = (mask_resized > 0).astype(np.uint8)
+
+    source_canvas = np.zeros((size, size, 3), dtype=np.uint8)
+    mask_canvas = np.zeros((size, size), dtype=np.uint8)
+    paste_center(source_canvas, source_resized)
+    paste_center(mask_canvas, mask_resized)
+    return source_canvas, mask_canvas
+
+
+def prepare_full_source_and_mask(source_image, mask_image, size):
+    source = load_rgb_image(source_image, size)
+    mask = load_mask_image(mask_image, size)
+    return source, mask
 
 
 def tensor_to_image(tensor):
@@ -85,6 +175,7 @@ def first_pass_blend(
     style_weight=1e4,
     content_weight=1.0,
     tv_weight=1e-6,
+    mask_scale=1.0,
     seed=None,
     progress_interval=10,
     save_output=True,
@@ -98,9 +189,8 @@ def first_pass_blend(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    source_img = load_rgb_image(source_image, ss)
+    source_img, mask_img = prepare_source_object(source_image, mask_image, ss, mask_scale)
     target_img = load_rgb_image(target_image, ts)
-    mask_img = load_mask_image(mask_image, ss)
 
     canvas_mask = make_canvas_mask(x, y, target_img, mask_img)
     canvas_mask = numpy2tensor(canvas_mask, device)
@@ -212,6 +302,7 @@ def parse_args():
     parser.add_argument("--style_weight", type=float, default=1e4, help="style loss weight")
     parser.add_argument("--content_weight", type=float, default=1.0, help="content loss weight")
     parser.add_argument("--tv_weight", type=float, default=1e-6, help="total variation loss weight")
+    parser.add_argument("--mask_scale", type=float, default=1.0, help="uniform object/mask scale inside the source canvas")
     parser.add_argument("--seed", type=int, default=None, help="optional random seed")
     return parser.parse_args()
 
@@ -233,6 +324,7 @@ def main():
         style_weight=args.style_weight,
         content_weight=args.content_weight,
         tv_weight=args.tv_weight,
+        mask_scale=args.mask_scale,
         seed=args.seed,
     )
     print(f"Saved first-pass blend to {Path(output_path).resolve()}")
