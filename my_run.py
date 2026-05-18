@@ -115,10 +115,12 @@ def prepare_source_object(source_image, mask_image, size, mask_scale=1.0):
             "Use the SAM mask generated from this source image, or upload a matching mask."
         )
 
-    if mask_bbox(mask) is None:
+    box = mask_bbox(mask)
+    if box is None:
         raise ValueError("The mask is empty. Draw, extract, or upload a non-empty object mask.")
 
-    return source, mask
+    left, top, right, bottom = box
+    return source[top:bottom, left:right], mask[top:bottom, left:right]
 
 
 def paste_source_mask_to_target(x_start, y_start, target_img, mask):

@@ -701,7 +701,7 @@ def placement_preview(source_image, source_path, source_original_image, mask_ima
     source = Image.fromarray(source_image.astype(np.uint8)).convert("RGB")
     target = Image.fromarray(to_rgb_array(target_image).astype(np.uint8)).convert("RGB").resize((ts, ts))
     mask = Image.fromarray((prepared_mask * 255).astype(np.uint8)).convert("L")
-    mask_display = (prepared_mask * 255).astype(np.uint8)
+    mask_display = to_mask_array(mask_input)
 
     source_np = np.array(source).astype(np.float32)
     target_np = np.array(target).astype(np.float32)
