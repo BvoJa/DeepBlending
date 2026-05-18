@@ -74,7 +74,8 @@ INSTALL_LOADING_JS = """
 
 SHOW_UPLOAD_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Preparing uploaded image...'); return []; }"
 SHOW_PREVIEW_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Creating placement preview...'); return []; }"
-SHOW_EDIT_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Running first-pass and second-pass blending...'); return []; }"
+SHOW_EDIT_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Running first-pass blending...'); return []; }"
+SHOW_STYLIZE_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Running second-pass style optimization...'); return []; }"
 SHOW_SAM_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Extracting mask with SAM...'); return []; }"
 SAM_MODEL_CACHE = {}
 SAM_CHECKPOINT_NAME = "efficient_sam_vits.pt"
@@ -86,21 +87,22 @@ class SamSetupError(Exception):
 
 DESCRIPTION = """
 # Deep Image Blending
-Gradio demo for two-pass object blending. Upload a source image, brush the object mask, upload a target image and style-reference image, choose placement and loss weights, then click `Edit`.
+Gradio demo for two-phase object blending. Use `Edit` for the first-pass blend, then `Stylized` for second-pass style optimization.
 """
 
 BLEND_DESCRIPTION = """
-## Two-Pass Object Blending
+## Two-Phase Object Blending
 Usage:
 - Upload a source image and brush directly over the object.
 - Or upload a mask image in the mask box.
 - Upload a target image using the same plain image-upload style as DragonDiffusion.
-- Upload a style-reference image for the second pass.
+- Upload a style-reference image for phase 2.
 - Optionally paste Kaggle/local file paths to avoid slow browser upload.
 - Adjust target size and object center.
 - Adjust the loss weights that contribute to the first-pass total loss.
 - Click `Preview Placement` to inspect the mask and location.
-- Click `Edit` to run first-pass image blending, then second-pass full-image style optimization.
+- Click `Edit` to run and show the first-pass blend.
+- Click `Stylized` to optimize the first-pass output with whole-image style loss.
 """
 
 examples_blend = [
@@ -132,7 +134,11 @@ def show_preview_loading():
 
 
 def show_edit_loading():
-    return show_loading("Running first-pass and second-pass blending...")
+    return show_loading("Running first-pass blending...")
+
+
+def show_stylize_loading():
+    return show_loading("Running second-pass style optimization...")
 
 
 def show_upload_loading():
@@ -141,6 +147,10 @@ def show_upload_loading():
 
 def hide_loading():
     return gr.update(value=loading_panel_html())
+
+
+def clear_first_pass_state():
+    return None
 
 
 def candidate_sam_checkpoint_paths(extra_path=None):
@@ -430,11 +440,11 @@ def load_images_from_paths(source_path, mask_path, target_path, style_path):
     sam_points = [] if has_source else gr.update()
     sam_point_labels = [] if has_source else gr.update()
     active_mask = to_mask_array(mask) if has_mask else (None if has_source else gr.update())
-    return source, mask, target, style, source_original, sam_points, sam_point_labels, active_mask
+    return source, mask, target, style, source_original, sam_points, sam_point_labels, active_mask, None
 
 
 def store_active_mask(mask_image):
-    return to_mask_array(mask_image)
+    return to_mask_array(mask_image), None
 
 
 def activate_drawn_source_mask(source_image, source_path="", source_original_image=None):
@@ -447,8 +457,8 @@ def activate_drawn_source_mask(source_image, source_path="", source_original_ima
     if source is None:
         raise gr.Error("Upload a source image before drawing the mask.")
     if drawn_mask is None or drawn_mask.max() == 0:
-        return None, None, source, "Source image ready. Brush over the object to create a mask."
-    return drawn_mask, drawn_mask, source, "Brush mask ready."
+        return None, None, source, None, "Source image ready. Brush over the object to create a mask."
+    return drawn_mask, drawn_mask, source, None, "Brush mask ready."
 
 
 def extract_drawn_source_and_mask(source_image):
@@ -553,7 +563,7 @@ def resolve_source_for_sam(source_image, source_path="", fallback_image=None):
 
 def store_source_original(source_image, source_path=""):
     source = resolve_source_for_sam(source_image, source_path)
-    return source, None, [], [], "Source image ready. Brush over the object to create a mask."
+    return source, None, [], [], None, "Source image ready. Brush over the object to create a mask."
 
 
 def normalize_box_points(points):
@@ -744,8 +754,6 @@ def run_first_pass(
     active_mask,
     target_image,
     target_path,
-    style_image,
-    style_path,
     ss,
     ts,
     mask_scale,
@@ -757,14 +765,10 @@ def run_first_pass(
     style_weight,
     content_weight,
     tv_weight,
-    second_steps,
-    second_style_weight,
-    second_tv_weight,
     seed,
     output_dir,
 ):
     target_image = resolve_target(target_image, target_path)
-    style_image = resolve_style_reference(style_image, style_path)
     source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path, active_mask)
     ss = int(ss)
     ts = int(ts)
@@ -791,8 +795,32 @@ def run_first_pass(
         seed=seed_value,
         progress_interval=max(1, int(num_steps) // 20),
     )
+
+    losses = {"first_pass": history[-1] if history else {}}
+    status = f"Saved first-pass image to {Path(output_path).resolve()}"
+    return [image], output_path, losses, status, x, y, image
+
+
+def run_second_pass(
+    first_pass_image,
+    style_image,
+    style_path,
+    ts,
+    gpu_id,
+    second_steps,
+    second_style_weight,
+    second_tv_weight,
+    seed,
+    output_dir,
+):
+    if first_pass_image is None:
+        raise gr.Error("Click `Edit` first to create the first-pass blend image.")
+    style_image = resolve_style_reference(style_image, style_path)
+    ts = int(ts)
+    seed_value = None if seed is None or int(seed) < 0 else int(seed)
+
     second_image, second_output_path, second_history = second_pass_blend(
-        first_pass_image=image,
+        first_pass_image=first_pass_image,
         style_image=style_image,
         output_dir=output_dir or DEFAULT_OUTPUT_DIR,
         ts=ts,
@@ -804,19 +832,13 @@ def run_first_pass(
         progress_interval=max(1, int(second_steps) // 20),
     )
 
-    losses = {
-        "first_pass": history[-1] if history else {},
-        "second_pass": second_history[-1] if second_history else {},
-    }
-    status = (
-        f"Saved first-pass image to {Path(output_path).resolve()}\n"
-        f"Saved second-pass image to {Path(second_output_path).resolve()}"
-    )
-    return [image, second_image], second_output_path, losses, status, x, y
+    losses = {"second_pass": second_history[-1] if second_history else {}}
+    status = f"Saved second-pass image to {Path(second_output_path).resolve()}"
+    return [first_pass_image, second_image], second_output_path, losses, status
 
 
 def clear_demo():
-    return None, "", None, "", None, None, "", None, "", None, [], [], None, None, None, None, {}, "", loading_panel_html()
+    return None, "", None, "", None, None, "", None, "", None, [], [], None, None, None, None, None, {}, "", loading_panel_html()
 
 
 def create_demo_blend(runner):
@@ -825,6 +847,7 @@ def create_demo_blend(runner):
         sam_points = gr.State([])
         sam_point_labels = gr.State([])
         active_mask_state = gr.State(value=None)
+        first_pass_state = gr.State(value=None)
         ss = gr.State(value=512)
         mask_scale = gr.State(value=1.0)
 
@@ -871,6 +894,7 @@ def create_demo_blend(runner):
                         preview_button = gr.Button("Preview Placement")
                     with gr.Row():
                         run_button = gr.Button("Edit", variant="primary")
+                        stylize_button = gr.Button("Stylized")
                         clear_button = gr.Button("Clear")
 
                     with gr.Group():
@@ -907,10 +931,10 @@ def create_demo_blend(runner):
                         preview_image = gr.Image(label="Placement preview", type="numpy")
 
                     gr.Markdown("<h5><center>Results</center></h5>")
-                    output = gr.Gallery(label="Results", columns=1, height="auto")
+                    output = gr.Gallery(label="Results", columns=2, height="auto")
 
                     with gr.Row():
-                        output_file = gr.File(label="Saved second_pass.png")
+                        output_file = gr.File(label="Saved output image")
                         losses = gr.JSON(label="Latest logged losses")
                     status = gr.Textbox(label="Status", interactive=False)
                     loading_panel = gr.HTML(loading_panel_html())
@@ -949,6 +973,7 @@ def create_demo_blend(runner):
                 sam_points,
                 sam_point_labels,
                 active_mask_state,
+                first_pass_state,
             ],
             show_progress="full",
         )
@@ -965,7 +990,7 @@ def create_demo_blend(runner):
         ).then(
             store_source_original,
             inputs=[source_image, source_path],
-            outputs=[source_original_image, active_mask_state, sam_points, sam_point_labels, status],
+            outputs=[source_original_image, active_mask_state, sam_points, sam_point_labels, first_pass_state, status],
             queue=False,
             show_progress="hidden",
         )
@@ -982,7 +1007,7 @@ def create_demo_blend(runner):
         ).then(
             store_active_mask,
             inputs=[mask_image],
-            outputs=[active_mask_state],
+            outputs=[active_mask_state, first_pass_state],
             queue=False,
             show_progress="hidden",
         )
@@ -999,6 +1024,7 @@ def create_demo_blend(runner):
         )
         target_upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
         target_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        target_image.upload(clear_first_pass_state, inputs=[], outputs=[first_pass_state], queue=False, show_progress="hidden")
 
         style_upload_event = style_image.upload(
             show_upload_loading,
@@ -1014,7 +1040,7 @@ def create_demo_blend(runner):
         source_image.change(
             activate_drawn_source_mask,
             inputs=[source_image, source_path, source_original_image],
-            outputs=[mask_image, mask_preview, source_original_image, status],
+            outputs=[mask_image, mask_preview, source_original_image, first_pass_state, status],
             queue=False,
             show_progress="hidden",
         )
@@ -1055,8 +1081,6 @@ def create_demo_blend(runner):
                 active_mask_state,
                 target_image,
                 target_path,
-                style_image,
-                style_path,
                 ss,
                 ts,
                 mask_scale,
@@ -1068,18 +1092,43 @@ def create_demo_blend(runner):
                 style_weight,
                 content_weight,
                 tv_weight,
+                seed,
+                output_dir,
+            ],
+            outputs=[output, output_file, losses, status, x, y, first_pass_state],
+            show_progress="full",
+            show_progress_on=[output, status],
+        )
+        run_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        run_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
+        stylize_event = stylize_button.click(
+            show_stylize_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
+            js=SHOW_STYLIZE_LOADING_JS,
+        ).then(
+            run_second_pass,
+            inputs=[
+                first_pass_state,
+                style_image,
+                style_path,
+                ts,
+                gpu_id,
                 second_steps,
                 second_style_weight,
                 second_tv_weight,
                 seed,
                 output_dir,
             ],
-            outputs=[output, output_file, losses, status, x, y],
+            outputs=[output, output_file, losses, status],
             show_progress="full",
             show_progress_on=[output, status],
         )
-        run_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
-        run_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        stylize_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        stylize_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
 
         clear_button.click(
             clear_demo,
@@ -1097,6 +1146,7 @@ def create_demo_blend(runner):
                 source_original_image,
                 sam_points,
                 sam_point_labels,
+                first_pass_state,
                 mask_preview,
                 preview_image,
                 output,
