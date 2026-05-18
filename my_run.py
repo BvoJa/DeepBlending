@@ -51,23 +51,47 @@ def load_rgb_array(image):
 
 
 def load_mask_array(image, size=None):
+    used_alpha = False
     if isinstance(image, np.ndarray):
-        if image.ndim == 3:
-            pil_image = Image.fromarray(image.astype(np.uint8)).convert("L")
+        image_array = np.asarray(image)
+        if image_array.dtype != np.uint8:
+            image_array = image_array.astype(np.float32)
+            if image_array.size and np.nanmax(image_array) <= 1.0:
+                image_array *= 255.0
+            image_array = np.clip(image_array, 0, 255).astype(np.uint8)
+        if image_array.ndim == 3 and image_array.shape[2] == 4 and np.any(image_array[:, :, 3] < 255):
+            pil_image = Image.fromarray(image_array[:, :, 3])
+            used_alpha = True
+        elif image_array.ndim == 3:
+            pil_image = Image.fromarray(image_array[:, :, :3]).convert("L")
         else:
-            pil_image = Image.fromarray(image.astype(np.uint8))
+            pil_image = Image.fromarray(image_array)
     else:
-        pil_image = Image.open(image)
-    pil_image = pil_image.convert("L")
+        loaded_image = Image.open(image)
+        has_alpha = "A" in loaded_image.getbands() or "transparency" in loaded_image.info
+        if has_alpha:
+            rgba = loaded_image.convert("RGBA")
+            alpha = np.array(rgba.getchannel("A"))
+            if np.any(alpha < 255):
+                pil_image = Image.fromarray(alpha)
+                used_alpha = True
+            else:
+                pil_image = rgba.convert("L")
+        else:
+            pil_image = loaded_image.convert("L")
     if size is not None:
         pil_image = pil_image.resize(size, Image.NEAREST)
     mask = np.array(pil_image)
-    mask[mask > 0] = 1
-    return mask.astype(np.uint8)
+    threshold = 0 if used_alpha else 127
+    return (mask > threshold).astype(np.uint8)
 
 
 def load_mask_image(image, size):
     return load_mask_array(image, (size, size))
+
+
+def image_to_nchw_tensor(image, device):
+    return torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float().contiguous().to(device)
 
 
 def mask_bbox(mask):
@@ -207,13 +231,13 @@ def first_pass_blend(
 
     gt_gradient = compute_gt_gradient(x, y, source_img, target_img, mask_img, device)
 
-    source_img = torch.from_numpy(source_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
-    target_img = torch.from_numpy(target_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
-    style_img = torch.from_numpy(style_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
+    source_img = image_to_nchw_tensor(source_img, device)
+    target_img = image_to_nchw_tensor(target_img, device)
+    style_img = image_to_nchw_tensor(style_img, device)
     input_img = torch.randn(target_img.shape, device=device)
     input_img.requires_grad_()
     if style_optimizes_target:
-        target_style_img = target_img.clone().detach().requires_grad_()
+        target_style_img = target_img.detach().clone().contiguous().requires_grad_()
         optimized_tensors = [input_img, target_style_img]
     else:
         target_style_img = target_img
@@ -276,6 +300,9 @@ def first_pass_blend(
             loss = grad_loss + style_loss + content_loss + tv_loss
             optimizer.zero_grad()
             loss.backward()
+            for tensor in optimized_tensors:
+                if tensor.grad is not None and not tensor.grad.is_contiguous():
+                    tensor.grad = tensor.grad.contiguous()
 
             if progress_interval > 0 and run[0] % progress_interval == 0:
                 history.append(

@@ -377,15 +377,37 @@ def to_rgba_array(image):
     return np.array(Image.open(image).convert("RGBA"))
 
 
+def to_uint8_array(image):
+    array = np.asarray(image)
+    if array.dtype == np.uint8:
+        return array
+    array = array.astype(np.float32)
+    if array.size and np.nanmax(array) <= 1.0:
+        array *= 255.0
+    return np.clip(array, 0, 255).astype(np.uint8)
+
+
 def to_mask_array(image):
     if image is None:
         return None
     if isinstance(image, np.ndarray):
-        mask = np.array(Image.fromarray(image.astype(np.uint8)).convert("L"))
+        image_array = to_uint8_array(image)
     else:
-        mask = np.array(Image.open(image).convert("L"))
-    mask[mask > 0] = 255
-    return mask.astype(np.uint8)
+        pil_image = Image.open(image)
+        has_alpha = "A" in pil_image.getbands() or "transparency" in pil_image.info
+        image_array = np.array(pil_image.convert("RGBA" if has_alpha else "L"))
+
+    used_alpha = False
+    if image_array.ndim == 3 and image_array.shape[2] == 4 and np.any(image_array[:, :, 3] < 255):
+        mask = image_array[:, :, 3]
+        used_alpha = True
+    elif image_array.ndim == 3:
+        mask = np.array(Image.fromarray(image_array[:, :, :3]).convert("L"))
+    else:
+        mask = image_array
+
+    threshold = 0 if used_alpha else 127
+    return (mask > threshold).astype(np.uint8) * 255
 
 
 def resolve_image_input(image, path, label, required=True):
@@ -421,19 +443,26 @@ def load_image_path(path, mode):
 def load_images_from_paths(source_path, mask_path, target_path, style_path):
     has_source = bool((source_path or "").strip())
     source = load_image_path(source_path, "RGB") if has_source else gr.update()
-    has_mask = bool((mask_path or "").strip())
-    mask = load_image_path(mask_path, "L") if has_mask else gr.update()
+    mask_path = (mask_path or "").strip()
+    has_mask = bool(mask_path)
+    if has_mask and not os.path.exists(mask_path):
+        raise gr.Error(f"Mask path does not exist: {mask_path}")
+    mask = to_mask_array(mask_path) if has_mask else gr.update()
     target = load_image_path(target_path, "RGB") if (target_path or "").strip() else gr.update()
     style = load_image_path(style_path, "RGB") if (style_path or "").strip() else gr.update()
     source_original = source if has_source else gr.update()
     sam_points = [] if has_source else gr.update()
     sam_point_labels = [] if has_source else gr.update()
     active_mask = to_mask_array(mask) if has_mask else (None if has_source else gr.update())
-    return source, mask, target, style, source_original, sam_points, sam_point_labels, active_mask
+    mask_preview = active_mask if has_mask else (None if has_source else gr.update())
+    return source, mask, target, style, source_original, sam_points, sam_point_labels, active_mask, mask_preview
 
 
 def store_active_mask(mask_image):
-    return to_mask_array(mask_image)
+    mask = to_mask_array(mask_image)
+    if mask is None:
+        return None, None, "No mask image selected."
+    return mask, mask, "Uploaded mask ready."
 
 
 def activate_drawn_source_mask(source_image, source_path="", source_original_image=None):
@@ -446,8 +475,8 @@ def activate_drawn_source_mask(source_image, source_path="", source_original_ima
     if source is None:
         raise gr.Error("Upload a source image before drawing the mask.")
     if drawn_mask is None or drawn_mask.max() == 0:
-        return None, None, source, "Source image ready. Brush over the object to create a mask."
-    return drawn_mask, drawn_mask, source, "Brush mask ready."
+        return None, None, None, source, "Source image ready. Brush over the object to create a mask."
+    return drawn_mask, drawn_mask, drawn_mask, source, "Brush mask ready."
 
 
 def extract_drawn_source_and_mask(source_image):
@@ -509,8 +538,18 @@ def resolve_source_and_mask(source_image, mask_image, source_path="", source_ori
     if source is None:
         source = to_rgb_array(source_image)
 
-    mask_from_path = load_image_path(mask_path, "L")
-    uploaded_mask = to_mask_array(mask_from_path)
+    mask_path = (mask_path or "").strip()
+    if mask_path and not os.path.exists(mask_path):
+        raise gr.Error(f"Mask path does not exist: {mask_path}")
+    uploaded_mask = to_mask_array(mask_path) if mask_path else None
+    if uploaded_mask is not None:
+        if source is None:
+            raise gr.Error("Upload a source image before using a mask image.")
+        return source, uploaded_mask
+
+    uploaded_mask = to_mask_array(active_mask)
+    if uploaded_mask is None:
+        uploaded_mask = to_mask_array(mask_image)
     if uploaded_mask is not None:
         if source is None:
             raise gr.Error("Upload a source image before using a mask image.")
@@ -520,14 +559,6 @@ def resolve_source_and_mask(source_image, mask_image, source_path="", source_ori
         if source is None:
             raise gr.Error("Upload a source image before drawing the mask.")
         return source, drawn_mask
-
-    uploaded_mask = to_mask_array(active_mask)
-    if uploaded_mask is None:
-        uploaded_mask = to_mask_array(mask_image)
-    if uploaded_mask is not None:
-        if source is None:
-            raise gr.Error("Upload a source image before using a mask image.")
-        return source, uploaded_mask
 
     if source is None:
         raise gr.Error("Upload a source image first.")
@@ -877,7 +908,7 @@ def create_demo_blend(runner):
                 with gr.Group():
                     gr.Markdown("# OUTPUT")
                     with gr.Row():
-                        mask_preview = gr.Image(label="Active mask", type="numpy", image_mode="L")
+                        mask_preview = gr.Image(label="Active mask", type="numpy", image_mode="L", elem_id="active-mask-preview")
                         preview_image = gr.Image(label="Placement preview", type="numpy")
 
                     gr.Markdown("<h5><center>Results</center></h5>")
@@ -914,7 +945,17 @@ def create_demo_blend(runner):
         ).then(
             load_images_from_paths,
             inputs=[source_path, mask_path, target_path, style_path],
-            outputs=[source_image, mask_image, target_image, style_image, source_original_image, sam_points, sam_point_labels, active_mask_state],
+            outputs=[
+                source_image,
+                mask_image,
+                target_image,
+                style_image,
+                source_original_image,
+                sam_points,
+                sam_point_labels,
+                active_mask_state,
+                mask_preview,
+            ],
             show_progress="full",
         )
         load_paths_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
@@ -947,7 +988,7 @@ def create_demo_blend(runner):
         ).then(
             store_active_mask,
             inputs=[mask_image],
-            outputs=[active_mask_state],
+            outputs=[active_mask_state, mask_preview, status],
             queue=False,
             show_progress="hidden",
         )
@@ -979,7 +1020,7 @@ def create_demo_blend(runner):
         source_image.change(
             activate_drawn_source_mask,
             inputs=[source_image, source_path, source_original_image],
-            outputs=[mask_image, mask_preview, source_original_image, status],
+            outputs=[mask_image, mask_preview, active_mask_state, source_original_image, status],
             queue=False,
             show_progress="hidden",
         )

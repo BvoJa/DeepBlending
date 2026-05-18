@@ -46,3 +46,8 @@ footer {
     transform: rotate(360deg);
   }
 }
+
+#active-mask-preview img,
+#active-mask-preview canvas {
+  object-fit: contain !important;
+}
