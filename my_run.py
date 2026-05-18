@@ -194,14 +194,16 @@ def first_pass_blend(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    style_optimizes_target = style_image is not None
     source_img, mask_img = prepare_source_object(source_image, mask_image, ss, mask_scale)
     target_img = load_rgb_image(target_image, ts)
-    style_img = load_rgb_image(style_image if style_image is not None else target_image, ts)
+    style_img = load_rgb_image(style_image if style_optimizes_target else target_image, ts)
     validate_source_placement(x, y, source_img.shape, target_img.shape)
 
     canvas_mask = paste_source_mask_to_target(x, y, target_img, mask_img)
     canvas_mask = numpy2tensor(canvas_mask, device)
     canvas_mask = canvas_mask.squeeze(0).repeat(3, 1).view(3, ts, ts).unsqueeze(0)
+    outside_mask = (canvas_mask - 1) * (-1)
 
     gt_gradient = compute_gt_gradient(x, y, source_img, target_img, mask_img, device)
 
@@ -209,12 +211,19 @@ def first_pass_blend(
     target_img = torch.from_numpy(target_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
     style_img = torch.from_numpy(style_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
     input_img = torch.randn(target_img.shape, device=device)
+    input_img.requires_grad_()
+    if style_optimizes_target:
+        target_style_img = target_img.clone().detach().requires_grad_()
+        optimized_tensors = [input_img, target_style_img]
+    else:
+        target_style_img = target_img
+        optimized_tensors = [input_img]
 
     mask_img = numpy2tensor(mask_img, device)
     source_h, source_w = source_img.shape[2], source_img.shape[3]
     mask_img = mask_img.squeeze(0).repeat(3, 1).view(3, source_h, source_w).unsqueeze(0)
 
-    optimizer = optim.LBFGS([input_img.requires_grad_()])
+    optimizer = optim.LBFGS(optimized_tensors)
     mse = torch.nn.MSELoss()
     mean_shift = MeanShift(device)
     vgg = Vgg16().to(device).eval()
@@ -225,11 +234,14 @@ def first_pass_blend(
     history = []
     run = [0]
 
+    def compose_blend():
+        target_side = target_style_img if style_optimizes_target else target_img
+        return input_img * canvas_mask + target_side * outside_mask
+
     while run[0] <= num_steps:
 
         def closure():
-            blend_img = torch.zeros(target_img.shape, device=device)
-            blend_img = input_img * canvas_mask + target_img * (canvas_mask - 1) * (-1)
+            blend_img = compose_blend()
 
             pred_gradient = laplacian_filter_tensor(blend_img, device)
             grad_loss = 0
@@ -238,7 +250,7 @@ def first_pass_blend(
             grad_loss /= len(pred_gradient)
             grad_loss *= grad_weight
 
-            blend_features_style = vgg(mean_shift(input_img))
+            blend_features_style = vgg(mean_shift(blend_img))
             blend_gram_style = [gram_matrix(feature) for feature in blend_features_style]
 
             style_loss = 0
@@ -282,8 +294,9 @@ def first_pass_blend(
         optimizer.step(closure)
 
     input_img.data.clamp_(0, 255)
-    blend_img = torch.zeros(target_img.shape, device=device)
-    blend_img = input_img * canvas_mask + target_img * (canvas_mask - 1) * (-1)
+    if style_optimizes_target:
+        target_style_img.data.clamp_(0, 255)
+    blend_img = compose_blend()
     blend_img_np = tensor_to_image(blend_img)
 
     output_path = os.path.join(output_dir, "first_pass.png")

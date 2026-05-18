@@ -57,13 +57,13 @@ def compute_gt_gradient(x_start, y_start, source_img, target_img, mask, gpu_id):
     red_source_gradient = red_source_gradient_tensor.cpu().data.numpy()[0]
     green_source_gradient = green_source_gradient_tensor.cpu().data.numpy()[0]
     blue_source_gradient = blue_source_gradient_tenosr.cpu().data.numpy()[0]
-    
+
     # compute target image gradient
     target_img_tensor = torch.from_numpy(target_img).unsqueeze(0).transpose(1,3).transpose(2,3).float().to(gpu_id)
-    red_target_gradient_tensor, green_target_gradient_tensor, blue_target_gradient_tenosr = laplacian_filter_tensor(target_img_tensor, gpu_id)    
+    red_target_gradient_tensor, green_target_gradient_tensor, blue_target_gradient_tenosr = laplacian_filter_tensor(target_img_tensor, gpu_id)
     red_target_gradient = red_target_gradient_tensor.cpu().data.numpy()[0]
     green_target_gradient = green_target_gradient_tensor.cpu().data.numpy()[0]
-    blue_target_gradient = blue_target_gradient_tenosr.cpu().data.numpy()[0]    
+    blue_target_gradient = blue_target_gradient_tenosr.cpu().data.numpy()[0]
     
     # mask and canvas mask
     canvas_mask = np.zeros((target_img.shape[0], target_img.shape[1]))
@@ -87,7 +87,7 @@ def compute_gt_gradient(x_start, y_start, source_img, target_img, mask, gpu_id):
     red_background_gradient = red_target_gradient * (canvas_mask - 1) * (-1)
     green_background_gradient = green_target_gradient * (canvas_mask - 1) * (-1)
     blue_background_gradient = blue_target_gradient * (canvas_mask - 1) * (-1)
-    
+
     # add up foreground and background gradient
     gt_red_gradient = red_foreground_gradient + red_background_gradient
     gt_green_gradient = green_foreground_gradient + green_background_gradient

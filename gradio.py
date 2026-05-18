@@ -95,7 +95,7 @@ Usage:
 - Upload a source image and brush directly over the object.
 - Or upload a mask image in the mask box.
 - Upload a target image using the same plain image-upload style as DragonDiffusion.
-- Optionally upload a style-reference image; this image is used for style loss.
+- Optionally upload a style-reference image; style loss optimizes the composite blend, including the target pixels outside the mask.
 - Optionally paste Kaggle/local file paths to avoid slow browser upload.
 - Adjust target size and object center.
 - Adjust the loss weights that contribute to the first-pass total loss.
