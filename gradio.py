@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from my_run import first_pass_blend, prepare_source_object
+from my_run import first_pass_blend, prepare_source_object, second_pass_blend
 
 
 def import_gradio_package():
@@ -74,7 +74,7 @@ INSTALL_LOADING_JS = """
 
 SHOW_UPLOAD_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Preparing uploaded image...'); return []; }"
 SHOW_PREVIEW_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Creating placement preview...'); return []; }"
-SHOW_EDIT_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Running first-pass blending...'); return []; }"
+SHOW_EDIT_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Running first-pass and second-pass blending...'); return []; }"
 SHOW_SAM_LOADING_JS = "() => { window.deepBlendingSetLoading?.('Extracting mask with SAM...'); return []; }"
 SAM_MODEL_CACHE = {}
 SAM_CHECKPOINT_NAME = "efficient_sam_vits.pt"
@@ -86,20 +86,21 @@ class SamSetupError(Exception):
 
 DESCRIPTION = """
 # Deep Image Blending
-Gradio demo for first-pass object blending. Upload a source image, brush the object mask, upload a target image, choose placement and loss weights, then click `Edit`.
+Gradio demo for two-pass object blending. Upload a source image, brush the object mask, upload a target image and style-reference image, choose placement and loss weights, then click `Edit`.
 """
 
 BLEND_DESCRIPTION = """
-## First-Pass Object Blending
+## Two-Pass Object Blending
 Usage:
 - Upload a source image and brush directly over the object.
 - Or upload a mask image in the mask box.
 - Upload a target image using the same plain image-upload style as DragonDiffusion.
+- Upload a style-reference image for the second pass.
 - Optionally paste Kaggle/local file paths to avoid slow browser upload.
 - Adjust target size and object center.
 - Adjust the loss weights that contribute to the first-pass total loss.
 - Click `Preview Placement` to inspect the mask and location.
-- Click `Edit` to run first-pass image blending.
+- Click `Edit` to run first-pass image blending, then second-pass full-image style optimization.
 """
 
 examples_blend = [
@@ -131,7 +132,7 @@ def show_preview_loading():
 
 
 def show_edit_loading():
-    return show_loading("Running first-pass blending...")
+    return show_loading("Running first-pass and second-pass blending...")
 
 
 def show_upload_loading():
@@ -398,6 +399,17 @@ def resolve_target(target_image, target_path):
     return target_image
 
 
+def resolve_style_reference(style_image, style_path):
+    path = (style_path or "").strip()
+    if path:
+        if not os.path.exists(path):
+            raise gr.Error(f"Style reference path does not exist: {path}")
+        return path
+    if style_image is None:
+        raise gr.Error("Upload a style-reference image or enter a Kaggle/local style path.")
+    return style_image
+
+
 def load_image_path(path, mode):
     path = (path or "").strip()
     if not path:
@@ -407,17 +419,18 @@ def load_image_path(path, mode):
     return np.array(Image.open(path).convert(mode))
 
 
-def load_images_from_paths(source_path, mask_path, target_path):
+def load_images_from_paths(source_path, mask_path, target_path, style_path):
     has_source = bool((source_path or "").strip())
     source = load_image_path(source_path, "RGB") if has_source else gr.update()
     has_mask = bool((mask_path or "").strip())
     mask = load_image_path(mask_path, "L") if has_mask else gr.update()
     target = load_image_path(target_path, "RGB") if (target_path or "").strip() else gr.update()
+    style = load_image_path(style_path, "RGB") if (style_path or "").strip() else gr.update()
     source_original = source if has_source else gr.update()
     sam_points = [] if has_source else gr.update()
     sam_point_labels = [] if has_source else gr.update()
     active_mask = to_mask_array(mask) if has_mask else (None if has_source else gr.update())
-    return source, mask, target, source_original, sam_points, sam_point_labels, active_mask
+    return source, mask, target, style, source_original, sam_points, sam_point_labels, active_mask
 
 
 def store_active_mask(mask_image):
@@ -731,6 +744,8 @@ def run_first_pass(
     active_mask,
     target_image,
     target_path,
+    style_image,
+    style_path,
     ss,
     ts,
     mask_scale,
@@ -742,10 +757,14 @@ def run_first_pass(
     style_weight,
     content_weight,
     tv_weight,
+    second_steps,
+    second_style_weight,
+    second_tv_weight,
     seed,
     output_dir,
 ):
     target_image = resolve_target(target_image, target_path)
+    style_image = resolve_style_reference(style_image, style_path)
     source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path, active_mask)
     ss = int(ss)
     ts = int(ts)
@@ -772,14 +791,32 @@ def run_first_pass(
         seed=seed_value,
         progress_interval=max(1, int(num_steps) // 20),
     )
+    second_image, second_output_path, second_history = second_pass_blend(
+        first_pass_image=image,
+        style_image=style_image,
+        output_dir=output_dir or DEFAULT_OUTPUT_DIR,
+        ts=ts,
+        gpu_id=gpu_id,
+        num_steps=int(second_steps),
+        style_weight=float(second_style_weight),
+        tv_weight=float(second_tv_weight),
+        seed=seed_value,
+        progress_interval=max(1, int(second_steps) // 20),
+    )
 
-    losses = history[-1] if history else {}
-    status = f"Saved first-pass image to {Path(output_path).resolve()}"
-    return [image], output_path, losses, status, x, y
+    losses = {
+        "first_pass": history[-1] if history else {},
+        "second_pass": second_history[-1] if second_history else {},
+    }
+    status = (
+        f"Saved first-pass image to {Path(output_path).resolve()}\n"
+        f"Saved second-pass image to {Path(second_output_path).resolve()}"
+    )
+    return [image, second_image], second_output_path, losses, status, x, y
 
 
 def clear_demo():
-    return None, "", None, "", None, None, "", None, [], [], None, None, None, None, {}, "", loading_panel_html()
+    return None, "", None, "", None, None, "", None, "", None, [], [], None, None, None, None, {}, "", loading_panel_html()
 
 
 def create_demo_blend(runner):
@@ -815,9 +852,15 @@ def create_demo_blend(runner):
                         label="Fast target path on Kaggle/local machine",
                         placeholder="/kaggle/input/your-dataset/target.jpg",
                     )
+                    gr.Markdown("## 4. Upload style-reference image")
+                    style_image = make_upload_image("Style reference image")
+                    style_path = gr.Textbox(
+                        label="Fast style path on Kaggle/local machine",
+                        placeholder="/kaggle/input/your-dataset/style.jpg",
+                    )
                     load_paths_button = gr.Button("Load Images From Paths")
 
-                    gr.Markdown("## 4. Position and size")
+                    gr.Markdown("## 5. Position and size")
                     ts = gr.Slider(128, 1024, value=512, step=1, label="Target size (--ts)")
                     with gr.Row():
                         x = gr.Slider(0, 1024, value=256, step=1, label="Vertical center (--x)")
@@ -831,7 +874,7 @@ def create_demo_blend(runner):
                         clear_button = gr.Button("Clear")
 
                     with gr.Group():
-                        gr.Markdown("## 5. Optimization")
+                        gr.Markdown("## 6. Optimization")
                         with gr.Row():
                             gpu_id = gr.Dropdown(
                                 ["auto", "cpu", "cuda:0", "cuda:1"],
@@ -839,14 +882,19 @@ def create_demo_blend(runner):
                                 label="Device (--gpu_id)",
                                 allow_custom_value=True,
                             )
-                            num_steps = gr.Slider(1, 3000, value=100, step=1, label="Steps (--num_steps)")
-                        gr.Markdown("## Loss weights")
+                            num_steps = gr.Slider(1, 3000, value=100, step=1, label="First-pass steps (--num_steps)")
+                        gr.Markdown("## First-pass loss weights")
                         with gr.Row():
                             grad_weight = gr.Slider(0, 50000, value=1e4, step=100, label="Gradient loss weight")
-                            style_weight = gr.Slider(0, 50000, value=1e4, step=100, label="Style loss weight")
+                            style_weight = gr.Slider(0, 50000, value=1e4, step=100, label="First-pass style loss weight")
                         with gr.Row():
                             content_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Content loss weight")
                             tv_weight = gr.Number(value=1e-6, label="TV loss weight")
+                        gr.Markdown("## Second-pass style optimization")
+                        with gr.Row():
+                            second_steps = gr.Slider(1, 3000, value=100, step=1, label="Second-pass steps")
+                            second_style_weight = gr.Slider(0, 100000000, value=1e7, step=100000, label="Second-pass style loss weight")
+                        second_tv_weight = gr.Number(value=1e-6, label="Second-pass TV loss weight")
                         with gr.Accordion("Advanced options", open=False):
                             seed = gr.Number(value=0, precision=0, label="Seed, use -1 for random")
                             output_dir = gr.Textbox(value=DEFAULT_OUTPUT_DIR, label="Output directory (--output_dir)")
@@ -862,7 +910,7 @@ def create_demo_blend(runner):
                     output = gr.Gallery(label="Results", columns=1, height="auto")
 
                     with gr.Row():
-                        output_file = gr.File(label="Saved first_pass.png")
+                        output_file = gr.File(label="Saved second_pass.png")
                         losses = gr.JSON(label="Latest logged losses")
                     status = gr.Textbox(label="Status", interactive=False)
                     loading_panel = gr.HTML(loading_panel_html())
@@ -891,8 +939,17 @@ def create_demo_blend(runner):
             js=SHOW_UPLOAD_LOADING_JS,
         ).then(
             load_images_from_paths,
-            inputs=[source_path, mask_path, target_path],
-            outputs=[source_image, mask_image, target_image, source_original_image, sam_points, sam_point_labels, active_mask_state],
+            inputs=[source_path, mask_path, target_path, style_path],
+            outputs=[
+                source_image,
+                mask_image,
+                target_image,
+                style_image,
+                source_original_image,
+                sam_points,
+                sam_point_labels,
+                active_mask_state,
+            ],
             show_progress="full",
         )
         load_paths_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
@@ -943,6 +1000,17 @@ def create_demo_blend(runner):
         target_upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
         target_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
 
+        style_upload_event = style_image.upload(
+            show_upload_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
+            js=SHOW_UPLOAD_LOADING_JS,
+        )
+        style_upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        style_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
         source_image.change(
             activate_drawn_source_mask,
             inputs=[source_image, source_path, source_original_image],
@@ -987,6 +1055,8 @@ def create_demo_blend(runner):
                 active_mask_state,
                 target_image,
                 target_path,
+                style_image,
+                style_path,
                 ss,
                 ts,
                 mask_scale,
@@ -998,6 +1068,9 @@ def create_demo_blend(runner):
                 style_weight,
                 content_weight,
                 tv_weight,
+                second_steps,
+                second_style_weight,
+                second_tv_weight,
                 seed,
                 output_dir,
             ],
@@ -1019,6 +1092,8 @@ def create_demo_blend(runner):
                 active_mask_state,
                 target_image,
                 target_path,
+                style_image,
+                style_path,
                 source_original_image,
                 sam_points,
                 sam_point_labels,

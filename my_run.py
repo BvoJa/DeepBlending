@@ -70,6 +70,11 @@ def load_mask_image(image, size):
     return load_mask_array(image, (size, size))
 
 
+def image_to_nchw_tensor(image, device):
+    image = np.ascontiguousarray(image)
+    return torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).float().contiguous().to(device)
+
+
 def mask_bbox(mask):
     ys, xs = np.where(mask > 0)
     if len(xs) == 0 or len(ys) == 0:
@@ -142,6 +147,12 @@ def tensor_to_image(tensor):
     return np.clip(image, 0, 255).astype(np.uint8)
 
 
+def make_grads_contiguous(tensors):
+    for tensor in tensors:
+        if tensor.grad is not None and not tensor.grad.is_contiguous():
+            tensor.grad = tensor.grad.contiguous()
+
+
 def validate_placement(x, y, ss, ts):
     half = ss * 0.5
     if x - half < 0 or y - half < 0 or x + half > ts or y + half > ts:
@@ -203,8 +214,8 @@ def first_pass_blend(
 
     gt_gradient = compute_gt_gradient(x, y, source_img, target_img, mask_img, device)
 
-    source_img = torch.from_numpy(source_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
-    target_img = torch.from_numpy(target_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
+    source_img = image_to_nchw_tensor(source_img, device)
+    target_img = image_to_nchw_tensor(target_img, device)
     input_img = torch.randn(target_img.shape, device=device)
 
     mask_img = numpy2tensor(mask_img, device)
@@ -261,6 +272,7 @@ def first_pass_blend(
             loss = grad_loss + style_loss + content_loss + tv_loss
             optimizer.zero_grad()
             loss.backward()
+            make_grads_contiguous([input_img])
 
             if progress_interval > 0 and run[0] % progress_interval == 0:
                 history.append(
@@ -290,11 +302,100 @@ def first_pass_blend(
     return blend_img_np, output_path, history
 
 
+def second_pass_blend(
+    first_pass_image,
+    style_image,
+    output_dir="results/gradio",
+    ts=512,
+    gpu_id="auto",
+    num_steps=1000,
+    style_weight=1e7,
+    tv_weight=1e-6,
+    seed=None,
+    progress_interval=10,
+    save_output=True,
+):
+    if style_image is None:
+        raise ValueError("Upload a style-reference image before running the second pass.")
+
+    device = resolve_device(gpu_id)
+    if seed is not None:
+        torch.manual_seed(int(seed))
+        if device.type == "cuda":
+            torch.cuda.manual_seed_all(int(seed))
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    first_pass_img = load_rgb_image(first_pass_image, ts)
+    style_img = load_rgb_image(style_image, ts)
+    first_pass_img = image_to_nchw_tensor(first_pass_img, device).requires_grad_()
+    style_img = image_to_nchw_tensor(style_img, device)
+
+    optimized_tensors = [first_pass_img]
+    optimizer = optim.LBFGS(optimized_tensors)
+    mse = torch.nn.MSELoss()
+    mean_shift = MeanShift(device)
+    vgg = Vgg16().to(device).eval()
+
+    with torch.no_grad():
+        style_reference_features = vgg(mean_shift(style_img))
+        style_reference_gram = [gram_matrix(feature).detach() for feature in style_reference_features]
+
+    history = []
+    run = [0]
+
+    while run[0] <= num_steps:
+
+        def closure():
+            blend_features_style = vgg(mean_shift(first_pass_img))
+            blend_gram_style = [gram_matrix(feature) for feature in blend_features_style]
+
+            style_loss = 0
+            for layer in range(len(blend_gram_style)):
+                style_loss += mse(blend_gram_style[layer], style_reference_gram[layer])
+            style_loss /= len(blend_gram_style)
+            style_loss *= style_weight
+
+            tv_loss = torch.sum(torch.abs(first_pass_img[:, :, :, :-1] - first_pass_img[:, :, :, 1:])) + torch.sum(
+                torch.abs(first_pass_img[:, :, :-1, :] - first_pass_img[:, :, 1:, :])
+            )
+            tv_loss *= tv_weight
+
+            loss = style_loss + tv_loss
+            optimizer.zero_grad()
+            loss.backward()
+            make_grads_contiguous(optimized_tensors)
+
+            if progress_interval > 0 and run[0] % progress_interval == 0:
+                history.append(
+                    {
+                        "step": run[0],
+                        "style": float(style_loss.detach().cpu()),
+                        "tv": float(tv_loss.detach().cpu()),
+                        "total": float(loss.detach().cpu()),
+                    }
+                )
+            run[0] += 1
+            return loss
+
+        optimizer.step(closure)
+
+    first_pass_img.data.clamp_(0, 255)
+    second_pass_np = tensor_to_image(first_pass_img)
+
+    output_path = os.path.join(output_dir, "second_pass.png")
+    if save_output:
+        imsave(output_path, second_pass_np)
+
+    return second_pass_np, output_path, history
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run first-pass Deep Image Blending only.")
+    parser = argparse.ArgumentParser(description="Run first-pass Deep Image Blending, optionally followed by second-pass style optimization.")
     parser.add_argument("--source_file", type=str, default="data/1_source.png", help="path to the source image")
     parser.add_argument("--mask_file", type=str, default="data/1_mask.png", help="path to the mask image")
     parser.add_argument("--target_file", type=str, default="data/1_target.png", help="path to the target image")
+    parser.add_argument("--style_file", type=str, default=None, help="optional style-reference image for the second pass")
     parser.add_argument("--output_dir", type=str, default="results/my_run", help="path to output")
     parser.add_argument("--ss", type=int, default=512, help="kept for compatibility; source and mask are not resized")
     parser.add_argument("--ts", type=int, default=512, help="target image size")
@@ -306,6 +407,9 @@ def parse_args():
     parser.add_argument("--style_weight", type=float, default=1e4, help="style loss weight")
     parser.add_argument("--content_weight", type=float, default=1.0, help="content loss weight")
     parser.add_argument("--tv_weight", type=float, default=1e-6, help="total variation loss weight")
+    parser.add_argument("--second_steps", type=int, default=None, help="second-pass iterations; defaults to --num_steps")
+    parser.add_argument("--second_style_weight", type=float, default=1e7, help="second-pass style loss weight")
+    parser.add_argument("--second_tv_weight", type=float, default=1e-6, help="second-pass total variation loss weight")
     parser.add_argument("--mask_scale", type=float, default=1.0, help="kept for compatibility; source and mask are not scaled")
     parser.add_argument("--seed", type=int, default=None, help="optional random seed")
     return parser.parse_args()
@@ -334,6 +438,22 @@ def main():
     print(f"Saved first-pass blend to {Path(output_path).resolve()}")
     if history:
         print("Last logged losses:", history[-1])
+    if args.style_file:
+        second_image, second_output_path, second_history = second_pass_blend(
+            first_pass_image=image,
+            style_image=args.style_file,
+            output_dir=args.output_dir,
+            ts=args.ts,
+            gpu_id=args.gpu_id,
+            num_steps=args.second_steps if args.second_steps is not None else args.num_steps,
+            style_weight=args.second_style_weight,
+            tv_weight=args.second_tv_weight,
+            seed=args.seed,
+        )
+        print(f"Saved second-pass blend to {Path(second_output_path).resolve()}")
+        if second_history:
+            print("Last logged second-pass losses:", second_history[-1])
+        return second_image
     return image
 
 
