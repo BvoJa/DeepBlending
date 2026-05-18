@@ -86,13 +86,13 @@ class SamSetupError(Exception):
 
 DESCRIPTION = """
 # Deep Image Blending
-Gradio demo for first-pass object blending. Upload a source image, draw, upload, or extract its mask with SAM, upload a target image, choose placement and loss weights, then click `Edit`.
+Gradio demo for first-pass object blending. Upload a source image, brush the object mask, upload a target image, choose placement and loss weights, then click `Edit`.
 """
 
 BLEND_DESCRIPTION = """
 ## First-Pass Object Blending
 Usage:
-- Upload a source image and click two opposite box corners to extract the object mask with SAM.
+- Upload a source image and brush directly over the object.
 - Or upload a mask image in the mask box.
 - Upload a target image using the same plain image-upload style as DragonDiffusion.
 - Optionally paste Kaggle/local file paths to avoid slow browser upload.
@@ -278,19 +278,22 @@ def make_upload_image(label, image_mode="RGB"):
 
 
 def make_source_draw_image(label):
-    image_params = inspect.signature(gr.Image).parameters
-    if "tool" in image_params:
-        kwargs = {
-            "label": label,
-            "interactive": True,
-            "type": "numpy",
-            "tool": "sketch",
-        }
-        if "source" in image_params:
-            kwargs["source"] = "upload"
-        else:
-            kwargs["sources"] = ["upload"]
-        return gr.Image(**kwargs)
+    if hasattr(gr, "ImageEditor"):
+        return gr.ImageEditor(
+            label=label,
+            sources=["upload"],
+            type="numpy",
+            image_mode="RGBA",
+            brush=gr.Brush(
+                default_size=35,
+                colors=[("#ff7828", 0.35)],
+                default_color=("#ff7828", 0.35),
+                color_mode="fixed",
+            ),
+            eraser=gr.Eraser(default_size=35),
+            layers=True,
+            transforms=[],
+        )
 
     if hasattr(gr, "ImageMask"):
         return gr.ImageMask(
@@ -308,21 +311,19 @@ def make_source_draw_image(label):
             transforms=[],
         )
 
-    return gr.ImageEditor(
-        label=label,
-        sources=["upload"],
-        type="numpy",
-        image_mode="RGBA",
-        brush=gr.Brush(
-            default_size=35,
-            colors=[("#ff7828", 0.35)],
-            default_color=("#ff7828", 0.35),
-            color_mode="fixed",
-        ),
-        eraser=gr.Eraser(default_size=35),
-        layers=True,
-        transforms=[],
-    )
+    image_params = inspect.signature(gr.Image).parameters
+    kwargs = {
+        "label": label,
+        "interactive": True,
+        "type": "numpy",
+    }
+    if "tool" in image_params:
+        kwargs["tool"] = "sketch"
+    if "source" in image_params:
+        kwargs["source"] = "upload"
+    else:
+        kwargs["sources"] = ["upload"]
+    return gr.Image(**kwargs)
 
 
 def center_position(ts):
@@ -415,12 +416,26 @@ def load_images_from_paths(source_path, mask_path, target_path):
     source_original = source if has_source else gr.update()
     sam_points = [] if has_source else gr.update()
     sam_point_labels = [] if has_source else gr.update()
-    active_mask = to_mask_array(mask) if has_mask else gr.update()
+    active_mask = to_mask_array(mask) if has_mask else (None if has_source else gr.update())
     return source, mask, target, source_original, sam_points, sam_point_labels, active_mask
 
 
 def store_active_mask(mask_image):
     return to_mask_array(mask_image)
+
+
+def activate_drawn_source_mask(source_image, source_path="", source_original_image=None):
+    drawn_source, drawn_mask = extract_drawn_source_and_mask(source_image)
+    source = load_image_path(source_path, "RGB")
+    if source is None:
+        source = drawn_source
+    if source is None:
+        source = to_rgb_array(source_original_image)
+    if source is None:
+        raise gr.Error("Upload a source image before drawing the mask.")
+    if drawn_mask is None or drawn_mask.max() == 0:
+        return None, None, source, "Source image ready. Brush over the object to create a mask."
+    return drawn_mask, drawn_mask, source, "Brush mask ready."
 
 
 def extract_drawn_source_and_mask(source_image):
@@ -484,10 +499,6 @@ def resolve_source_and_mask(source_image, mask_image, source_path="", source_ori
 
     mask_from_path = load_image_path(mask_path, "L")
     uploaded_mask = to_mask_array(mask_from_path)
-    if uploaded_mask is None:
-        uploaded_mask = to_mask_array(active_mask)
-    if uploaded_mask is None:
-        uploaded_mask = to_mask_array(mask_image)
     if uploaded_mask is not None:
         if source is None:
             raise gr.Error("Upload a source image before using a mask image.")
@@ -497,6 +508,14 @@ def resolve_source_and_mask(source_image, mask_image, source_path="", source_ori
         if source is None:
             raise gr.Error("Upload a source image before drawing the mask.")
         return source, drawn_mask
+
+    uploaded_mask = to_mask_array(active_mask)
+    if uploaded_mask is None:
+        uploaded_mask = to_mask_array(mask_image)
+    if uploaded_mask is not None:
+        if source is None:
+            raise gr.Error("Upload a source image before using a mask image.")
+        return source, uploaded_mask
 
     if source is None:
         raise gr.Error("Upload a source image first.")
@@ -521,7 +540,7 @@ def resolve_source_for_sam(source_image, source_path="", fallback_image=None):
 
 def store_source_original(source_image, source_path=""):
     source = resolve_source_for_sam(source_image, source_path)
-    return source, [], [], "Source image ready. Click two opposite corners on it to create the SAM box."
+    return source, None, [], [], "Source image ready. Brush over the object to create a mask."
 
 
 def normalize_box_points(points):
@@ -760,7 +779,7 @@ def run_first_pass(
 
 
 def clear_demo():
-    return None, "", None, "", None, None, "", True, None, [], [], None, None, None, None, {}, "", loading_panel_html()
+    return None, "", None, "", None, None, "", None, [], [], None, None, None, None, {}, "", loading_panel_html()
 
 
 def create_demo_blend(runner):
@@ -777,8 +796,8 @@ def create_demo_blend(runner):
             with gr.Column():
                 with gr.Group():
                     gr.Markdown("# INPUT")
-                    gr.Markdown("## 1. Upload source image and click object box for SAM")
-                    source_image = make_upload_image("Source image")
+                    gr.Markdown("## 1. Upload source image and draw object mask")
+                    source_image = make_source_draw_image("Source image")
                     source_path = gr.Textbox(
                         label="Fast source path on Kaggle/local machine",
                         placeholder="/kaggle/input/your-dataset/source.jpg",
@@ -790,19 +809,6 @@ def create_demo_blend(runner):
                         label="Fast mask path on Kaggle/local machine",
                         placeholder="/kaggle/input/your-dataset/mask.png",
                     )
-                    with gr.Accordion("SAM mask extraction", open=False):
-                        sam_click_mode = gr.Checkbox(
-                            value=True,
-                            label="Use two clicks on Source image for SAM",
-                        )
-                        with gr.Row():
-                            clear_sam_button = gr.Button("Clear SAM Box")
-                        sam_checkpoint_path = gr.Textbox(
-                            value=default_sam_checkpoint_path(),
-                            label="EfficientSAM checkpoint",
-                            placeholder="models/efficient_sam_vits.pt",
-                        )
-
                     gr.Markdown("## 3. Upload target image")
                     target_image = make_upload_image("Target image")
                     target_path = gr.Textbox(
@@ -902,7 +908,7 @@ def create_demo_blend(runner):
         ).then(
             store_source_original,
             inputs=[source_image, source_path],
-            outputs=[source_original_image, sam_points, sam_point_labels, status],
+            outputs=[source_original_image, active_mask_state, sam_points, sam_point_labels, status],
             queue=False,
             show_progress="hidden",
         )
@@ -938,47 +944,13 @@ def create_demo_blend(runner):
         target_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
 
         source_image.change(
-            hide_loading,
-            inputs=[],
-            outputs=[loading_panel],
+            activate_drawn_source_mask,
+            inputs=[source_image, source_path, source_original_image],
+            outputs=[mask_image, mask_preview, source_original_image, status],
             queue=False,
             show_progress="hidden",
         )
         center_button.click(center_position, inputs=[ts], outputs=[x, y])
-
-        source_sam_select_event = source_image.select(
-            segment_source_image_clicks_with_sam,
-            inputs=[
-                sam_click_mode,
-                source_image,
-                source_path,
-                source_original_image,
-                sam_points,
-                sam_point_labels,
-                sam_checkpoint_path,
-                gpu_id,
-            ],
-            outputs=[
-                source_image,
-                source_original_image,
-                mask_image,
-                mask_preview,
-                active_mask_state,
-                sam_points,
-                sam_point_labels,
-                status,
-            ],
-            show_progress="full",
-            show_progress_on=[mask_preview],
-        )
-        source_sam_select_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
-        source_sam_select_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
-
-        clear_sam_button.click(
-            clear_sam_selection,
-            inputs=[source_original_image, source_image, source_path],
-            outputs=[source_image, source_original_image, sam_points, sam_point_labels, status],
-        )
 
         preview_event = preview_button.click(
             show_preview_loading,
@@ -1047,7 +1019,6 @@ def create_demo_blend(runner):
                 active_mask_state,
                 target_image,
                 target_path,
-                sam_click_mode,
                 source_original_image,
                 sam_points,
                 sam_point_labels,
