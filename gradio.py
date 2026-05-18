@@ -95,6 +95,7 @@ Usage:
 - Upload a source image and brush directly over the object.
 - Or upload a mask image in the mask box.
 - Upload a target image using the same plain image-upload style as DragonDiffusion.
+- Optionally upload a style-reference image; this image is used for style loss.
 - Optionally paste Kaggle/local file paths to avoid slow browser upload.
 - Adjust target size and object center.
 - Adjust the loss weights that contribute to the first-pass total loss.
@@ -387,15 +388,25 @@ def to_mask_array(image):
     return mask.astype(np.uint8)
 
 
-def resolve_target(target_image, target_path):
-    path = (target_path or "").strip()
+def resolve_image_input(image, path, label, required=True):
+    path = (path or "").strip()
     if path:
         if not os.path.exists(path):
-            raise gr.Error(f"Target path does not exist: {path}")
+            raise gr.Error(f"{label} path does not exist: {path}")
         return path
-    if target_image is None:
-        raise gr.Error("Upload a target image or enter a Kaggle/local target path.")
-    return target_image
+    if image is None:
+        if required:
+            raise gr.Error(f"Upload a {label.lower()} image or enter a Kaggle/local {label.lower()} path.")
+        return None
+    return image
+
+
+def resolve_target(target_image, target_path):
+    return resolve_image_input(target_image, target_path, "Target", required=True)
+
+
+def resolve_style_reference(style_image, style_path):
+    return resolve_image_input(style_image, style_path, "Style reference", required=False)
 
 
 def load_image_path(path, mode):
@@ -407,17 +418,18 @@ def load_image_path(path, mode):
     return np.array(Image.open(path).convert(mode))
 
 
-def load_images_from_paths(source_path, mask_path, target_path):
+def load_images_from_paths(source_path, mask_path, target_path, style_path):
     has_source = bool((source_path or "").strip())
     source = load_image_path(source_path, "RGB") if has_source else gr.update()
     has_mask = bool((mask_path or "").strip())
     mask = load_image_path(mask_path, "L") if has_mask else gr.update()
     target = load_image_path(target_path, "RGB") if (target_path or "").strip() else gr.update()
+    style = load_image_path(style_path, "RGB") if (style_path or "").strip() else gr.update()
     source_original = source if has_source else gr.update()
     sam_points = [] if has_source else gr.update()
     sam_point_labels = [] if has_source else gr.update()
     active_mask = to_mask_array(mask) if has_mask else (None if has_source else gr.update())
-    return source, mask, target, source_original, sam_points, sam_point_labels, active_mask
+    return source, mask, target, style, source_original, sam_points, sam_point_labels, active_mask
 
 
 def store_active_mask(mask_image):
@@ -731,6 +743,8 @@ def run_first_pass(
     active_mask,
     target_image,
     target_path,
+    style_image,
+    style_path,
     ss,
     ts,
     mask_scale,
@@ -746,6 +760,7 @@ def run_first_pass(
     output_dir,
 ):
     target_image = resolve_target(target_image, target_path)
+    style_image = resolve_style_reference(style_image, style_path)
     source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path, active_mask)
     ss = int(ss)
     ts = int(ts)
@@ -757,6 +772,7 @@ def run_first_pass(
         source_image=source_image,
         mask_image=mask_image,
         target_image=target_image,
+        style_image=style_image,
         output_dir=output_dir or DEFAULT_OUTPUT_DIR,
         ss=ss,
         ts=ts,
@@ -779,7 +795,7 @@ def run_first_pass(
 
 
 def clear_demo():
-    return None, "", None, "", None, None, "", None, [], [], None, None, None, None, {}, "", loading_panel_html()
+    return None, "", None, "", None, None, "", None, "", None, [], [], None, None, None, None, {}, "", loading_panel_html()
 
 
 def create_demo_blend(runner):
@@ -815,9 +831,15 @@ def create_demo_blend(runner):
                         label="Fast target path on Kaggle/local machine",
                         placeholder="/kaggle/input/your-dataset/target.jpg",
                     )
+                    gr.Markdown("## 4. Optional style reference")
+                    style_image = make_upload_image("Style reference image")
+                    style_path = gr.Textbox(
+                        label="Fast style path on Kaggle/local machine",
+                        placeholder="/kaggle/input/your-dataset/style.jpg",
+                    )
                     load_paths_button = gr.Button("Load Images From Paths")
 
-                    gr.Markdown("## 4. Position and size")
+                    gr.Markdown("## 5. Position and size")
                     ts = gr.Slider(128, 1024, value=512, step=1, label="Target size (--ts)")
                     with gr.Row():
                         x = gr.Slider(0, 1024, value=256, step=1, label="Vertical center (--x)")
@@ -831,7 +853,7 @@ def create_demo_blend(runner):
                         clear_button = gr.Button("Clear")
 
                     with gr.Group():
-                        gr.Markdown("## 5. Optimization")
+                        gr.Markdown("## 6. Optimization")
                         with gr.Row():
                             gpu_id = gr.Dropdown(
                                 ["auto", "cpu", "cuda:0", "cuda:1"],
@@ -891,8 +913,8 @@ def create_demo_blend(runner):
             js=SHOW_UPLOAD_LOADING_JS,
         ).then(
             load_images_from_paths,
-            inputs=[source_path, mask_path, target_path],
-            outputs=[source_image, mask_image, target_image, source_original_image, sam_points, sam_point_labels, active_mask_state],
+            inputs=[source_path, mask_path, target_path, style_path],
+            outputs=[source_image, mask_image, target_image, style_image, source_original_image, sam_points, sam_point_labels, active_mask_state],
             show_progress="full",
         )
         load_paths_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
@@ -943,6 +965,17 @@ def create_demo_blend(runner):
         target_upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
         target_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
 
+        style_upload_event = style_image.upload(
+            show_upload_loading,
+            inputs=[],
+            outputs=[loading_panel],
+            queue=False,
+            show_progress="hidden",
+            js=SHOW_UPLOAD_LOADING_JS,
+        )
+        style_upload_event.success(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+        style_upload_event.failure(hide_loading, inputs=[], outputs=[loading_panel], queue=False, show_progress="hidden")
+
         source_image.change(
             activate_drawn_source_mask,
             inputs=[source_image, source_path, source_original_image],
@@ -987,6 +1020,8 @@ def create_demo_blend(runner):
                 active_mask_state,
                 target_image,
                 target_path,
+                style_image,
+                style_path,
                 ss,
                 ts,
                 mask_scale,
@@ -1019,6 +1054,8 @@ def create_demo_blend(runner):
                 active_mask_state,
                 target_image,
                 target_path,
+                style_image,
+                style_path,
                 source_original_image,
                 sam_points,
                 sam_point_labels,

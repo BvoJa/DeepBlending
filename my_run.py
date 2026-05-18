@@ -169,6 +169,7 @@ def first_pass_blend(
     source_image,
     mask_image,
     target_image,
+    style_image=None,
     output_dir="results/gradio",
     ss=512,
     ts=512,
@@ -195,6 +196,7 @@ def first_pass_blend(
 
     source_img, mask_img = prepare_source_object(source_image, mask_image, ss, mask_scale)
     target_img = load_rgb_image(target_image, ts)
+    style_img = load_rgb_image(style_image if style_image is not None else target_image, ts)
     validate_source_placement(x, y, source_img.shape, target_img.shape)
 
     canvas_mask = paste_source_mask_to_target(x, y, target_img, mask_img)
@@ -205,6 +207,7 @@ def first_pass_blend(
 
     source_img = torch.from_numpy(source_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
     target_img = torch.from_numpy(target_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
+    style_img = torch.from_numpy(style_img).unsqueeze(0).transpose(1, 3).transpose(2, 3).float().to(device)
     input_img = torch.randn(target_img.shape, device=device)
 
     mask_img = numpy2tensor(mask_img, device)
@@ -215,6 +218,9 @@ def first_pass_blend(
     mse = torch.nn.MSELoss()
     mean_shift = MeanShift(device)
     vgg = Vgg16().to(device).eval()
+    with torch.no_grad():
+        style_reference_features = vgg(mean_shift(style_img))
+        style_reference_gram = [gram_matrix(feature).detach() for feature in style_reference_features]
 
     history = []
     run = [0]
@@ -232,15 +238,12 @@ def first_pass_blend(
             grad_loss /= len(pred_gradient)
             grad_loss *= grad_weight
 
-            target_features_style = vgg(mean_shift(target_img))
-            target_gram_style = [gram_matrix(feature) for feature in target_features_style]
-
             blend_features_style = vgg(mean_shift(input_img))
             blend_gram_style = [gram_matrix(feature) for feature in blend_features_style]
 
             style_loss = 0
             for layer in range(len(blend_gram_style)):
-                style_loss += mse(blend_gram_style[layer], target_gram_style[layer])
+                style_loss += mse(blend_gram_style[layer], style_reference_gram[layer])
             style_loss /= len(blend_gram_style)
             style_loss *= style_weight
 
@@ -295,6 +298,7 @@ def parse_args():
     parser.add_argument("--source_file", type=str, default="data/1_source.png", help="path to the source image")
     parser.add_argument("--mask_file", type=str, default="data/1_mask.png", help="path to the mask image")
     parser.add_argument("--target_file", type=str, default="data/1_target.png", help="path to the target image")
+    parser.add_argument("--style_file", type=str, default=None, help="optional style-reference image for style loss")
     parser.add_argument("--output_dir", type=str, default="results/my_run", help="path to output")
     parser.add_argument("--ss", type=int, default=512, help="kept for compatibility; source and mask are not resized")
     parser.add_argument("--ts", type=int, default=512, help="target image size")
@@ -317,6 +321,7 @@ def main():
         source_image=args.source_file,
         mask_image=args.mask_file,
         target_image=args.target_file,
+        style_image=args.style_file,
         output_dir=args.output_dir,
         ss=args.ss,
         ts=args.ts,
