@@ -754,8 +754,6 @@ def run_first_pass(
     active_mask,
     target_image,
     target_path,
-    style_image,
-    style_path,
     ss,
     ts,
     mask_scale,
@@ -771,7 +769,6 @@ def run_first_pass(
     output_dir,
 ):
     target_image = resolve_target(target_image, target_path)
-    style_image = resolve_style_reference(style_image, style_path)
     source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path, active_mask)
     ss = int(ss)
     ts = int(ts)
@@ -783,7 +780,6 @@ def run_first_pass(
         source_image=source_image,
         mask_image=mask_image,
         target_image=target_image,
-        style_image=style_image,
         output_dir=output_dir or DEFAULT_OUTPUT_DIR,
         ss=ss,
         ts=ts,
@@ -917,7 +913,7 @@ def create_demo_blend(runner):
                         gr.Markdown("## First-pass loss weights")
                         with gr.Row():
                             grad_weight = gr.Slider(0, 50000, value=1e4, step=100, label="Gradient loss weight")
-                            style_weight = gr.Slider(0, 100000000, value=1e6, step=10000, label="Style-reference loss weight")
+                            style_weight = gr.Slider(0, 50000, value=1e4, step=100, label="First-pass style loss weight")
                         with gr.Row():
                             content_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Content loss weight")
                             tv_weight = gr.Number(value=1e-6, label="TV loss weight")
@@ -1088,8 +1084,6 @@ def create_demo_blend(runner):
                 active_mask_state,
                 target_image,
                 target_path,
-                style_image,
-                style_path,
                 ss,
                 ts,
                 mask_scale,
