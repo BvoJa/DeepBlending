@@ -754,6 +754,8 @@ def run_first_pass(
     active_mask,
     target_image,
     target_path,
+    style_image,
+    style_path,
     ss,
     ts,
     mask_scale,
@@ -765,10 +767,12 @@ def run_first_pass(
     style_weight,
     content_weight,
     tv_weight,
+    reference_style_weight,
     seed,
     output_dir,
 ):
     target_image = resolve_target(target_image, target_path)
+    style_image = resolve_style_reference(style_image, style_path)
     source_image, mask_image = resolve_source_and_mask(source_image, mask_image, source_path, source_original_image, mask_path, active_mask)
     ss = int(ss)
     ts = int(ts)
@@ -780,6 +784,7 @@ def run_first_pass(
         source_image=source_image,
         mask_image=mask_image,
         target_image=target_image,
+        style_image=style_image,
         output_dir=output_dir or DEFAULT_OUTPUT_DIR,
         ss=ss,
         ts=ts,
@@ -791,6 +796,7 @@ def run_first_pass(
         style_weight=float(style_weight),
         content_weight=float(content_weight),
         tv_weight=float(tv_weight),
+        reference_style_weight=float(reference_style_weight),
         mask_scale=float(mask_scale),
         seed=seed_value,
         progress_interval=max(1, int(num_steps) // 20),
@@ -917,10 +923,10 @@ def create_demo_blend(runner):
                         with gr.Row():
                             content_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Content loss weight")
                             tv_weight = gr.Number(value=1e-6, label="TV loss weight")
-                        gr.Markdown("## Second-pass style optimization")
+                        gr.Markdown("## Style-reference loss")
                         with gr.Row():
                             second_steps = gr.Slider(1, 3000, value=500, step=1, label="Second-pass steps")
-                            second_style_weight = gr.Slider(0, 100000000, value=1e6, step=10000, label="Second-pass style multiplier")
+                            second_style_weight = gr.Slider(0, 100000000, value=1e6, step=10000, label="Style-reference loss weight")
                         second_content_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Second-pass content weight")
                         with gr.Accordion("Advanced options", open=False):
                             seed = gr.Number(value=0, precision=0, label="Seed, use -1 for random")
@@ -1084,6 +1090,8 @@ def create_demo_blend(runner):
                 active_mask_state,
                 target_image,
                 target_path,
+                style_image,
+                style_path,
                 ss,
                 ts,
                 mask_scale,
@@ -1095,6 +1103,7 @@ def create_demo_blend(runner):
                 style_weight,
                 content_weight,
                 tv_weight,
+                second_style_weight,
                 seed,
                 output_dir,
             ],
