@@ -809,6 +809,7 @@ def run_second_pass(
     gpu_id,
     second_steps,
     second_style_weight,
+    second_content_weight,
     second_tv_weight,
     seed,
     output_dir,
@@ -827,6 +828,7 @@ def run_second_pass(
         gpu_id=gpu_id,
         num_steps=int(second_steps),
         style_weight=float(second_style_weight),
+        content_weight=float(second_content_weight),
         tv_weight=float(second_tv_weight),
         seed=seed_value,
         progress_interval=max(1, int(second_steps) // 20),
@@ -917,8 +919,10 @@ def create_demo_blend(runner):
                         gr.Markdown("## Second-pass style optimization")
                         with gr.Row():
                             second_steps = gr.Slider(1, 3000, value=100, step=1, label="Second-pass steps")
-                            second_style_weight = gr.Slider(0, 100000000, value=1e7, step=100000, label="Second-pass style loss weight")
-                        second_tv_weight = gr.Number(value=1e-6, label="Second-pass TV loss weight")
+                            second_style_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Second-pass style multiplier")
+                        with gr.Row():
+                            second_content_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Second-pass content weight")
+                            second_tv_weight = gr.Number(value=0.0, label="Second-pass TV loss weight")
                         with gr.Accordion("Advanced options", open=False):
                             seed = gr.Number(value=0, precision=0, label="Seed, use -1 for random")
                             output_dir = gr.Textbox(value=DEFAULT_OUTPUT_DIR, label="Output directory (--output_dir)")
@@ -1119,6 +1123,7 @@ def create_demo_blend(runner):
                 gpu_id,
                 second_steps,
                 second_style_weight,
+                second_content_weight,
                 second_tv_weight,
                 seed,
                 output_dir,
