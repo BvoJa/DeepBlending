@@ -4,10 +4,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
 from PIL import Image
 from skimage.io import imsave
+from torchvision import models
 
 from utils import (
     MeanShift,
@@ -19,11 +19,29 @@ from utils import (
 )
 
 
-NOTEBOOK_BGR_MEAN = (0.40760392, 0.45795686, 0.48501961)
-NOTEBOOK_STYLE_LAYERS = ["r11", "r21", "r31", "r41", "r51"]
-NOTEBOOK_CONTENT_LAYERS = ["r42"]
-NOTEBOOK_LOSS_LAYERS = NOTEBOOK_STYLE_LAYERS + NOTEBOOK_CONTENT_LAYERS
-NOTEBOOK_STYLE_CHANNELS = [64, 128, 256, 512, 512]
+STYLE_LAYERS = ["r11", "r21", "r31", "r41", "r51"]
+CONTENT_LAYERS = ["r42"]
+STYLE_CHANNELS = [64, 128, 256, 512, 512]
+TORCHVISION_RGB_MEAN = (0.485, 0.456, 0.406)
+TORCHVISION_RGB_STD = (0.229, 0.224, 0.225)
+TORCHVISION_RELU_LAYERS = {
+    1: "r11",
+    3: "r12",
+    6: "r21",
+    8: "r22",
+    11: "r31",
+    13: "r32",
+    15: "r33",
+    17: "r34",
+    20: "r41",
+    22: "r42",
+    24: "r43",
+    26: "r44",
+    29: "r51",
+    31: "r52",
+    33: "r53",
+    35: "r54",
+}
 
 
 def resolve_device(gpu_id="auto"):
@@ -89,7 +107,7 @@ def image_to_pil_rgb(image):
     return Image.open(image).convert("RGB")
 
 
-def notebook_scale_image(pil_image, size):
+def aspect_scale_image(pil_image, size):
     width, height = pil_image.size
     if (width <= height and width == size) or (height <= width and height == size):
         return pil_image
@@ -102,133 +120,71 @@ def notebook_scale_image(pil_image, size):
     return pil_image.resize((new_width, new_height), Image.BILINEAR)
 
 
-def notebook_preprocess_image(image, size, device):
-    pil_image = notebook_scale_image(image_to_pil_rgb(image), size)
+def torchvision_preprocess_image(image, size, device, keep_aspect=False):
+    pil_image = image_to_pil_rgb(image)
+    if keep_aspect:
+        pil_image = aspect_scale_image(pil_image, size)
+    else:
+        pil_image = pil_image.resize((size, size), Image.BILINEAR)
     array = np.asarray(pil_image, dtype=np.float32) / 255.0
     tensor = torch.from_numpy(array).permute(2, 0, 1)
-    tensor = tensor[[2, 1, 0], :, :]
-    mean = tensor.new_tensor(NOTEBOOK_BGR_MEAN).view(3, 1, 1)
-    tensor = (tensor - mean).mul_(255.0)
+    mean = tensor.new_tensor(TORCHVISION_RGB_MEAN).view(3, 1, 1)
+    std = tensor.new_tensor(TORCHVISION_RGB_STD).view(3, 1, 1)
+    tensor = (tensor - mean) / std
     return tensor.unsqueeze(0).contiguous().to(device)
 
 
-def notebook_postprocess_image(tensor):
+def torchvision_postprocess_image(tensor):
     if tensor.dim() == 4:
         tensor = tensor[0]
     image = tensor.detach().cpu().clone()
-    mean = image.new_tensor(NOTEBOOK_BGR_MEAN).view(3, 1, 1)
-    image = image.mul(1.0 / 255.0)
-    image = image + mean
-    image = image[[2, 1, 0], :, :]
+    mean = image.new_tensor(TORCHVISION_RGB_MEAN).view(3, 1, 1)
+    std = image.new_tensor(TORCHVISION_RGB_STD).view(3, 1, 1)
+    image = image * std + mean
     image.clamp_(0, 1)
     image = image.permute(1, 2, 0).numpy() * 255.0
     return image.astype(np.uint8)
 
 
-class NotebookGramMatrix(torch.nn.Module):
+class StyleGramMatrix(torch.nn.Module):
     def forward(self, input):
         batch, channels, height, width = input.size()
-        features = input.view(batch, channels, height * width)
+        features = input.reshape(batch, channels, height * width)
         gram = torch.bmm(features, features.transpose(1, 2))
-        gram.div_(height * width)
-        return gram
+        return gram / (height * width)
 
 
-class NotebookGramMSELoss(torch.nn.Module):
+class StyleGramMSELoss(torch.nn.Module):
     def forward(self, input, target):
-        return torch.nn.MSELoss()(NotebookGramMatrix()(input), target)
+        return torch.nn.MSELoss()(StyleGramMatrix()(input), target)
 
 
-def resolve_notebook_vgg_checkpoint(checkpoint_path=None):
-    if checkpoint_path:
-        checkpoint = Path(checkpoint_path).expanduser()
-        if checkpoint.exists():
-            return checkpoint
-        raise FileNotFoundError(f"NeuralStyleTransfer VGG checkpoint was not found at {checkpoint}.")
-
-    root = Path(__file__).resolve().parent
-    candidates = [
-        root / "Models" / "vgg_conv.pth",
-        root / "models" / "vgg_conv.pth",
-        root / "vgg_conv.pth",
-        Path("Models") / "vgg_conv.pth",
-        Path("models") / "vgg_conv.pth",
-        Path("vgg_conv.pth"),
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
-
-
-class NotebookVGG(torch.nn.Module):
-    def __init__(self, pool="max"):
-        super(NotebookVGG, self).__init__()
-        self.conv1_1 = torch.nn.Conv2d(3, 64, kernel_size=3, padding=1)
-        self.conv1_2 = torch.nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.conv2_1 = torch.nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.conv2_2 = torch.nn.Conv2d(128, 128, kernel_size=3, padding=1)
-        self.conv3_1 = torch.nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.conv3_2 = torch.nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.conv3_3 = torch.nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.conv3_4 = torch.nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.conv4_1 = torch.nn.Conv2d(256, 512, kernel_size=3, padding=1)
-        self.conv4_2 = torch.nn.Conv2d(512, 512, kernel_size=3, padding=1)
-        self.conv4_3 = torch.nn.Conv2d(512, 512, kernel_size=3, padding=1)
-        self.conv4_4 = torch.nn.Conv2d(512, 512, kernel_size=3, padding=1)
-        self.conv5_1 = torch.nn.Conv2d(512, 512, kernel_size=3, padding=1)
-        self.conv5_2 = torch.nn.Conv2d(512, 512, kernel_size=3, padding=1)
-        self.conv5_3 = torch.nn.Conv2d(512, 512, kernel_size=3, padding=1)
-        self.conv5_4 = torch.nn.Conv2d(512, 512, kernel_size=3, padding=1)
-        pool_cls = torch.nn.MaxPool2d if pool == "max" else torch.nn.AvgPool2d
-        self.pool1 = pool_cls(kernel_size=2, stride=2)
-        self.pool2 = pool_cls(kernel_size=2, stride=2)
-        self.pool3 = pool_cls(kernel_size=2, stride=2)
-        self.pool4 = pool_cls(kernel_size=2, stride=2)
-        self.pool5 = pool_cls(kernel_size=2, stride=2)
+class TorchvisionVGG19(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        try:
+            weights = models.VGG19_Weights.DEFAULT
+            features = models.vgg19(weights=weights).features
+        except (AttributeError, TypeError):
+            features = models.vgg19(pretrained=True).features
+        for module in features.modules():
+            if isinstance(module, torch.nn.ReLU):
+                module.inplace = False
+        for parameter in features.parameters():
+            parameter.requires_grad = False
+        self.features = features
 
     def forward(self, image, out_keys):
-        out = {}
-        out["r11"] = F.relu(self.conv1_1(image))
-        out["r12"] = F.relu(self.conv1_2(out["r11"]))
-        out["p1"] = self.pool1(out["r12"])
-        out["r21"] = F.relu(self.conv2_1(out["p1"]))
-        out["r22"] = F.relu(self.conv2_2(out["r21"]))
-        out["p2"] = self.pool2(out["r22"])
-        out["r31"] = F.relu(self.conv3_1(out["p2"]))
-        out["r32"] = F.relu(self.conv3_2(out["r31"]))
-        out["r33"] = F.relu(self.conv3_3(out["r32"]))
-        out["r34"] = F.relu(self.conv3_4(out["r33"]))
-        out["p3"] = self.pool3(out["r34"])
-        out["r41"] = F.relu(self.conv4_1(out["p3"]))
-        out["r42"] = F.relu(self.conv4_2(out["r41"]))
-        out["r43"] = F.relu(self.conv4_3(out["r42"]))
-        out["r44"] = F.relu(self.conv4_4(out["r43"]))
-        out["p4"] = self.pool4(out["r44"])
-        out["r51"] = F.relu(self.conv5_1(out["p4"]))
-        out["r52"] = F.relu(self.conv5_2(out["r51"]))
-        out["r53"] = F.relu(self.conv5_3(out["r52"]))
-        out["r54"] = F.relu(self.conv5_4(out["r53"]))
-        out["p5"] = self.pool5(out["r54"])
-        return [out[key] for key in out_keys]
-
-
-def load_notebook_vgg(device, checkpoint_path=None):
-    checkpoint = resolve_notebook_vgg_checkpoint(checkpoint_path)
-    if checkpoint is None:
-        raise FileNotFoundError(
-            "Exact NeuralStyleTransfer.ipynb mode requires the notebook VGG checkpoint "
-            "`vgg_conv.pth`. Put it at `Models/vgg_conv.pth`, `models/vgg_conv.pth`, "
-            "or the project root."
-        )
-    vgg = NotebookVGG()
-    state = torch.load(checkpoint, map_location="cpu")
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
-    vgg.load_state_dict(state)
-    for parameter in vgg.parameters():
-        parameter.requires_grad = False
-    return vgg.to(device).eval()
+        outputs = {}
+        wanted = set(out_keys)
+        for index, layer in enumerate(self.features):
+            image = layer(image)
+            key = TORCHVISION_RELU_LAYERS.get(index)
+            if key in wanted:
+                outputs[key] = image
+                if len(outputs) == len(wanted):
+                    break
+        return [outputs[key] for key in out_keys]
 
 
 def mask_bbox(mask):
@@ -465,10 +421,9 @@ def second_pass_blend(
     ts=512,
     gpu_id="auto",
     num_steps=500,
-    style_weight=1.0,
+    style_weight=1e6,
     content_weight=1.0,
     tv_weight=0.0,
-    vgg_checkpoint=None,
     seed=None,
     progress_interval=10,
     save_output=True,
@@ -484,22 +439,22 @@ def second_pass_blend(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    vgg = load_notebook_vgg(device, vgg_checkpoint)
-    content_img = notebook_preprocess_image(first_pass_image, ts, device)
-    style_img = notebook_preprocess_image(style_image, ts, device)
+    vgg = TorchvisionVGG19().to(device).eval()
+    content_img = torchvision_preprocess_image(first_pass_image, ts, device)
+    style_img = torchvision_preprocess_image(style_image, ts, device, keep_aspect=True)
     opt_img = content_img.detach().clone().requires_grad_()
 
-    style_layers = NOTEBOOK_STYLE_LAYERS
-    content_layers = NOTEBOOK_CONTENT_LAYERS
+    style_layers = STYLE_LAYERS
+    content_layers = CONTENT_LAYERS
     loss_layers = style_layers + content_layers
-    loss_fns = [NotebookGramMSELoss()] * len(style_layers) + [torch.nn.MSELoss()] * len(content_layers)
+    loss_fns = [StyleGramMSELoss()] * len(style_layers) + [torch.nn.MSELoss()] * len(content_layers)
     loss_fns = [loss_fn.to(device) for loss_fn in loss_fns]
 
-    style_weights = [float(style_weight) * (1e3 / channels ** 2) for channels in NOTEBOOK_STYLE_CHANNELS]
+    style_weights = [float(style_weight) * (1e3 / channels ** 2) for channels in STYLE_CHANNELS]
     content_weights = [float(content_weight) * 1e0]
     weights = style_weights + content_weights
 
-    style_targets = [NotebookGramMatrix()(feature).detach() for feature in vgg(style_img, style_layers)]
+    style_targets = [StyleGramMatrix()(feature).detach() for feature in vgg(style_img, style_layers)]
     content_targets = [feature.detach() for feature in vgg(content_img, content_layers)]
     targets = style_targets + content_targets
 
@@ -538,7 +493,7 @@ def second_pass_blend(
 
         optimizer.step(closure)
 
-    second_pass_np = notebook_postprocess_image(opt_img.data[0].cpu().squeeze())
+    second_pass_np = torchvision_postprocess_image(opt_img.data[0].cpu().squeeze())
 
     output_path = os.path.join(output_dir, "second_pass.png")
     if save_output:
@@ -565,10 +520,9 @@ def parse_args():
     parser.add_argument("--content_weight", type=float, default=1.0, help="content loss weight")
     parser.add_argument("--tv_weight", type=float, default=1e-6, help="total variation loss weight")
     parser.add_argument("--second_steps", type=int, default=500, help="second-pass iterations, matching NeuralStyleTransfer.ipynb max_iter by default")
-    parser.add_argument("--second_style_weight", type=float, default=1.0, help="second-pass notebook-style loss multiplier")
+    parser.add_argument("--second_style_weight", type=float, default=1e6, help="second-pass torchvision VGG style multiplier")
     parser.add_argument("--second_content_weight", type=float, default=1.0, help="second-pass content loss weight")
-    parser.add_argument("--second_tv_weight", type=float, default=0.0, help="kept for compatibility; the exact notebook second pass does not use TV loss")
-    parser.add_argument("--vgg_checkpoint", type=str, default=None, help="path to NeuralStyleTransfer.ipynb Models/vgg_conv.pth")
+    parser.add_argument("--second_tv_weight", type=float, default=0.0, help="kept for compatibility; the second pass does not use TV loss")
     parser.add_argument("--mask_scale", type=float, default=1.0, help="kept for compatibility; source and mask are not scaled")
     parser.add_argument("--seed", type=int, default=None, help="optional random seed")
     return parser.parse_args()
@@ -607,7 +561,6 @@ def main():
             num_steps=args.second_steps,
             style_weight=args.second_style_weight,
             content_weight=args.second_content_weight,
-            vgg_checkpoint=args.vgg_checkpoint,
             seed=args.seed,
         )
         print(f"Saved second-pass blend to {Path(second_output_path).resolve()}")

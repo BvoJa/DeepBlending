@@ -810,7 +810,6 @@ def run_second_pass(
     second_steps,
     second_style_weight,
     second_content_weight,
-    vgg_checkpoint,
     seed,
     output_dir,
 ):
@@ -819,7 +818,6 @@ def run_second_pass(
     style_image = resolve_style_reference(style_image, style_path)
     ts = int(ts)
     seed_value = None if seed is None or int(seed) < 0 else int(seed)
-    vgg_checkpoint = (vgg_checkpoint or "").strip() or None
 
     try:
         second_image, second_output_path, second_history = second_pass_blend(
@@ -831,11 +829,10 @@ def run_second_pass(
             num_steps=int(second_steps),
             style_weight=float(second_style_weight),
             content_weight=float(second_content_weight),
-            vgg_checkpoint=vgg_checkpoint,
             seed=seed_value,
             progress_interval=max(1, int(second_steps) // 20),
         )
-    except FileNotFoundError as exc:
+    except Exception as exc:
         raise gr.Error(str(exc))
 
     losses = {"second_pass": second_history[-1] if second_history else {}}
@@ -923,11 +920,10 @@ def create_demo_blend(runner):
                         gr.Markdown("## Second-pass style optimization")
                         with gr.Row():
                             second_steps = gr.Slider(1, 3000, value=500, step=1, label="Second-pass steps")
-                            second_style_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Second-pass style multiplier")
+                            second_style_weight = gr.Slider(0, 100000000, value=1e6, step=10000, label="Second-pass style multiplier")
                         second_content_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Second-pass content weight")
                         with gr.Accordion("Advanced options", open=False):
                             seed = gr.Number(value=0, precision=0, label="Seed, use -1 for random")
-                            vgg_checkpoint = gr.Textbox(value="", label="NeuralStyleTransfer VGG checkpoint")
                             output_dir = gr.Textbox(value=DEFAULT_OUTPUT_DIR, label="Output directory (--output_dir)")
 
             with gr.Column():
@@ -1127,7 +1123,6 @@ def create_demo_blend(runner):
                 second_steps,
                 second_style_weight,
                 second_content_weight,
-                vgg_checkpoint,
                 seed,
                 output_dir,
             ],
