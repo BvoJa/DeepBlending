@@ -292,6 +292,7 @@ def first_pass_blend(
     source_image,
     mask_image,
     target_image,
+    style_image=None,
     output_dir="results/gradio",
     ss=512,
     ts=512,
@@ -303,6 +304,7 @@ def first_pass_blend(
     style_weight=1e4,
     content_weight=1.0,
     tv_weight=1e-6,
+    reference_style_weight=1e6,
     mask_scale=1.0,
     seed=None,
     progress_interval=10,
@@ -338,6 +340,32 @@ def first_pass_blend(
     mse = torch.nn.MSELoss()
     mean_shift = MeanShift(device)
     vgg = Vgg16().to(device).eval()
+    style_reference_vgg = None
+    style_reference_targets = None
+    style_reference_weights = None
+    style_reference_loss_fns = None
+    style_reference_layers = None
+    if style_image is not None:
+        style_reference_vgg = TorchvisionVGG19().to(device).eval()
+        style_reference_img = torchvision_preprocess_image(style_image, ts, device, keep_aspect=True)
+        style_reference_layers = STYLE_LAYERS
+        style_reference_targets = [
+            StyleGramMatrix()(feature).detach()
+            for feature in style_reference_vgg(style_reference_img, style_reference_layers)
+        ]
+        style_reference_weights = [
+            float(reference_style_weight) * (1e3 / channels ** 2)
+            for channels in STYLE_CHANNELS
+        ]
+        style_reference_loss_fns = [
+            StyleGramMSELoss().to(device)
+            for _ in style_reference_layers
+        ]
+        style_reference_mean = input_img.new_tensor(TORCHVISION_RGB_MEAN).view(1, 3, 1, 1)
+        style_reference_std = input_img.new_tensor(TORCHVISION_RGB_STD).view(1, 3, 1, 1)
+
+        def preprocess_current_blend_for_reference_style(image_tensor):
+            return ((image_tensor / 255.0) - style_reference_mean) / style_reference_std
 
     history = []
     run = [0]
@@ -381,7 +409,17 @@ def first_pass_blend(
             )
             tv_loss *= tv_weight
 
-            loss = grad_loss + style_loss + content_loss + tv_loss
+            reference_style_loss = blend_img.new_tensor(0.0)
+            if style_reference_vgg is not None:
+                blend_img_for_reference_style = preprocess_current_blend_for_reference_style(blend_img)
+                blend_reference_features = style_reference_vgg(blend_img_for_reference_style, style_reference_layers)
+                reference_layer_losses = [
+                    style_reference_weights[layer_index] * style_reference_loss_fns[layer_index](feature, style_reference_targets[layer_index])
+                    for layer_index, feature in enumerate(blend_reference_features)
+                ]
+                reference_style_loss = sum(reference_layer_losses)
+
+            loss = grad_loss + style_loss + content_loss + tv_loss + reference_style_loss
             optimizer.zero_grad()
             loss.backward()
             make_grads_contiguous([input_img])
@@ -392,6 +430,7 @@ def first_pass_blend(
                         "step": run[0],
                         "grad": float(grad_loss.detach().cpu()),
                         "style": float(style_loss.detach().cpu()),
+                        "reference_style": float(reference_style_loss.detach().cpu()),
                         "content": float(content_loss.detach().cpu()),
                         "tv": float(tv_loss.detach().cpu()),
                         "total": float(loss.detach().cpu()),
