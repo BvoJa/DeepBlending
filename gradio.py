@@ -913,11 +913,11 @@ def create_demo_blend(runner):
                                 label="Device (--gpu_id)",
                                 allow_custom_value=True,
                             )
-                            num_steps = gr.Slider(1, 3000, value=100, step=1, label="First-pass steps (--num_steps)")
+                            num_steps = gr.Slider(1, 3000, value=500, step=1, label="First-pass steps (--num_steps)")
                         gr.Markdown("## First-pass loss weights")
                         with gr.Row():
                             grad_weight = gr.Slider(0, 50000, value=1e4, step=100, label="Gradient loss weight")
-                            style_weight = gr.Slider(0, 1000000, value=1.0, step=1.0, label="Style-reference loss multiplier")
+                            style_weight = gr.Slider(0, 50000, value=10, step=1, label="First-pass style loss weight")
                         with gr.Row():
                             content_weight = gr.Slider(0, 10, value=1.0, step=0.1, label="Content loss weight")
                             tv_weight = gr.Number(value=1e-6, label="TV loss weight")

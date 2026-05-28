@@ -18,6 +18,7 @@ from utils import (
 STYLE_LAYERS = ["r11", "r21", "r31", "r41", "r51"]
 CONTENT_LAYERS = ["r42"]
 STYLE_CHANNELS = [64, 128, 256, 512, 512]
+NEURAL_STYLE_BGR_MEAN = (0.40760392, 0.45795686, 0.48501961)
 TORCHVISION_RGB_MEAN = (0.485, 0.456, 0.406)
 TORCHVISION_RGB_STD = (0.229, 0.224, 0.225)
 TORCHVISION_RELU_LAYERS = {
@@ -135,6 +136,27 @@ def torchvision_preprocess_tensor(image_tensor):
     mean = tensor.new_tensor(TORCHVISION_RGB_MEAN).view(1, 3, 1, 1)
     std = tensor.new_tensor(TORCHVISION_RGB_STD).view(1, 3, 1, 1)
     return (tensor - mean) / std
+
+
+def neural_style_preprocess_image(image, size, device, keep_aspect=False):
+    pil_image = image_to_pil_rgb(image)
+    if keep_aspect:
+        pil_image = aspect_scale_image(pil_image, size)
+    else:
+        pil_image = pil_image.resize((size, size), Image.BILINEAR)
+    array = np.asarray(pil_image, dtype=np.float32) / 255.0
+    tensor = torch.from_numpy(array).permute(2, 0, 1)
+    tensor = tensor[torch.LongTensor([2, 1, 0])]
+    mean = tensor.new_tensor(NEURAL_STYLE_BGR_MEAN).view(3, 1, 1)
+    tensor = (tensor - mean) * 255.0
+    return tensor.unsqueeze(0).contiguous().to(device)
+
+
+def neural_style_preprocess_tensor(image_tensor):
+    tensor = image_tensor / 255.0
+    tensor = tensor[:, [2, 1, 0], :, :]
+    mean = tensor.new_tensor(NEURAL_STYLE_BGR_MEAN).view(1, 3, 1, 1)
+    return (tensor - mean) * 255.0
 
 
 def torchvision_postprocess_image(tensor):
@@ -315,7 +337,7 @@ def first_pass_blend(
     gpu_id="auto",
     num_steps=1000,
     grad_weight=1e4,
-    style_weight=1.0,
+    style_weight=10.0,
     content_weight=1.0,
     tv_weight=1e-6,
     mask_scale=1.0,
@@ -341,8 +363,8 @@ def first_pass_blend(
     gt_gradient = compute_gt_gradient(x, y, source_np, target_np, mask_np, device)
     content_reference_np = make_content_reference_image(x, y, source_np, target_np, mask_np)
 
-    target_tensor = image_to_nchw_tensor(target_np, device)
-    input_img = torch.randn(target_tensor.shape, device=device)
+    content_reference_tensor = image_to_nchw_tensor(content_reference_np, device)
+    input_img = content_reference_tensor.detach().clone()
 
     optimizer = optim.LBFGS([input_img.requires_grad_()])
     mse = torch.nn.MSELoss()
@@ -358,8 +380,8 @@ def first_pass_blend(
     content_weights = [float(content_weight) * 1e0 for _ in content_layers]
     weights = style_weights + content_weights
 
-    style_reference_img = torchvision_preprocess_image(style_image, ts, device, keep_aspect=True)
-    content_reference_img = torchvision_preprocess_tensor(image_to_nchw_tensor(content_reference_np, device))
+    style_reference_img = neural_style_preprocess_image(style_image, ts, device, keep_aspect=True)
+    content_reference_img = neural_style_preprocess_tensor(content_reference_tensor)
     style_targets = [StyleGramMatrix()(feature).detach() for feature in style_vgg(style_reference_img, style_layers)]
     content_targets = [feature.detach() for feature in style_vgg(content_reference_img, content_layers)]
     targets = style_targets + content_targets
@@ -377,7 +399,7 @@ def first_pass_blend(
             grad_loss /= len(pred_gradient)
             grad_loss *= grad_weight
 
-            outputs = style_vgg(torchvision_preprocess_tensor(input_img), loss_layers)
+            outputs = style_vgg(neural_style_preprocess_tensor(input_img), loss_layers)
             style_content_layer_losses = [
                 weights[layer_index] * loss_fns[layer_index](activation, targets[layer_index])
                 for layer_index, activation in enumerate(outputs)
@@ -401,6 +423,7 @@ def first_pass_blend(
                         "step": run[0],
                         "grad": float(grad_loss.detach().cpu()),
                         "style": float(style_loss.detach().cpu()),
+                        "style_weight": float(style_weight),
                         "content": float(content_loss.detach().cpu()),
                         "tv": float(tv_loss.detach().cpu()),
                         "total": float(loss.detach().cpu()),
@@ -523,7 +546,7 @@ def parse_args():
     parser.add_argument("--gpu_id", type=str, default="auto", help="auto, cpu, cuda:0, or GPU index")
     parser.add_argument("--num_steps", type=int, default=1000, help="number of first-pass iterations")
     parser.add_argument("--grad_weight", type=float, default=1e4, help="gradient loss weight")
-    parser.add_argument("--style_weight", type=float, default=1.0, help="first-pass style-reference multiplier; 1.0 matches NeuralStyleTransfer.ipynb layer weights")
+    parser.add_argument("--style_weight", type=float, default=10.0, help="first-pass style-reference multiplier on the NeuralStyleTransfer.ipynb layer weights")
     parser.add_argument("--content_weight", type=float, default=1.0, help="content loss weight")
     parser.add_argument("--tv_weight", type=float, default=1e-6, help="total variation loss weight")
     parser.add_argument("--second_steps", type=int, default=500, help="second-pass iterations, matching NeuralStyleTransfer.ipynb max_iter by default")
