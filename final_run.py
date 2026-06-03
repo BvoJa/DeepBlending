@@ -895,7 +895,7 @@ def main():
 
     demo = create_demo()
     demo.queue(max_size=20, default_concurrency_limit=1)
-    demo.launch(server_name=args.server_name, server_port=args.server_port, share=args.share)
+    demo.launch(server_name=args.server_name, server_port=args.server_port, share=True)
 
 
 if __name__ == "__main__":
