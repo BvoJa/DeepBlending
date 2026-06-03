@@ -169,6 +169,22 @@ def load_rgb_image(image, size):
     return np.array(pil_image.resize((size, size), Image.BILINEAR))
 
 
+def load_mask_array(image, size=None):
+    if isinstance(image, np.ndarray):
+        if image.ndim == 3:
+            pil_image = Image.fromarray(image.astype(np.uint8)).convert("L")
+        else:
+            pil_image = Image.fromarray(image.astype(np.uint8))
+    else:
+        pil_image = Image.open(image)
+    pil_image = pil_image.convert("L")
+    if size is not None:
+        pil_image = pil_image.resize(size, Image.NEAREST)
+    mask = np.array(pil_image)
+    mask[mask > 0] = 1
+    return mask.astype(np.uint8)
+
+
 def notebook_preprocess_image(image, size, device, keep_aspect=True):
     pil_image = image_to_pil_rgb(image)
     pil_image = resize_short_edge(pil_image, size) if keep_aspect else pil_image.resize((size, size), Image.BILINEAR)
@@ -236,6 +252,35 @@ def fit_source_placement(x, y, source_shape, target_size):
     fitted_x = int(np.clip(int(x), min_x, max_x))
     fitted_y = int(np.clip(int(y), min_y, max_y))
     return fitted_x, fitted_y
+
+
+def mask_bbox(mask):
+    ys, xs = np.where(mask > 0)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def prepare_source_object(source_image, mask_image=None, size=None, mask_scale=1.0):
+    if mask_image is None:
+        source = load_rgb_image(source_image, int(size or DEFAULT_SOURCE_SIZE))
+        mask = np.ones(source.shape[:2], dtype=np.uint8)
+        return source, mask
+
+    source = np.array(image_to_pil_rgb(source_image))
+    mask = load_mask_array(mask_image)
+    if mask.shape[:2] != source.shape[:2]:
+        raise ValueError(
+            "The mask must have the same height and width as the source image. "
+            "Use the drawn/SAM mask generated from this source image, or upload a matching mask."
+        )
+
+    box = mask_bbox(mask)
+    if box is None:
+        raise ValueError("The mask is empty. Draw, extract, or upload a non-empty object mask.")
+
+    left, top, right, bottom = box
+    return source[top:bottom, left:right], mask[top:bottom, left:right]
 
 
 def make_content_reference_image(x_start, y_start, source_img, target_img, mask):
@@ -471,6 +516,7 @@ def gradient_style_transfer(
     source_image,
     target_image,
     style_image,
+    mask_image=None,
     output_dir=DEFAULT_OUTPUT_DIR,
     source_size=DEFAULT_SOURCE_SIZE,
     target_size=DEFAULT_TARGET_SIZE,
@@ -507,9 +553,8 @@ def gradient_style_transfer(
     y = int(target_size // 2 if y is None else y)
     os.makedirs(output_dir, exist_ok=True)
 
-    source_np = load_rgb_image(source_image, source_size)
+    source_np, mask_np = prepare_source_object(source_image, mask_image, source_size)
     target_np = load_rgb_image(target_image, target_size)
-    mask_np = np.ones(source_np.shape[:2], dtype=np.uint8)
     validate_source_placement(x, y, source_np.shape, target_np.shape)
 
     gt_gradient = compute_gt_gradient(x, y, source_np, target_np, mask_np, device)
@@ -689,6 +734,7 @@ def run_gradio(
             source_image=source_image,
             target_image=target_image,
             style_image=style_image,
+            mask_image=None,
             output_dir=output_dir or DEFAULT_OUTPUT_DIR,
             source_size=int(source_size),
             target_size=int(target_size),
@@ -833,6 +879,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="NST.ipynb optimization with my_run.py gradient loss.")
     parser.add_argument("--cli", action="store_true", help="run once instead of launching Gradio")
     parser.add_argument("--source_file", type=str, default=None, help="path to the source image")
+    parser.add_argument("--mask_file", type=str, default=None, help="optional path to a source object mask")
     parser.add_argument("--target_file", type=str, default=None, help="path to the target image")
     parser.add_argument("--style_file", type=str, default=None, help="path to the style image")
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR, help="path to output")
@@ -873,6 +920,7 @@ def main():
             source_image=args.source_file,
             target_image=args.target_file,
             style_image=args.style_file,
+            mask_image=args.mask_file,
             output_dir=args.output_dir,
             source_size=args.source_size,
             target_size=args.target_size,
