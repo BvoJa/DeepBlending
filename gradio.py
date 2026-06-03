@@ -921,7 +921,7 @@ def create_demo_blend(runner):
                                 label="Device (--gpu_id)",
                                 allow_custom_value=True,
                             )
-                            num_steps = gr.Slider(1, 3000, value=DEFAULT_NUM_STEPS, step=1, label="First-pass steps (--num_steps)")
+                            num_steps = gr.Slider(1, 100000, value=DEFAULT_NUM_STEPS, step=1, label="First-pass steps (--num_steps)")
                         gr.Markdown("## First-pass loss weights")
                         with gr.Row():
                             grad_weight = gr.Slider(0, 50000, value=1e4, step=100, label="Gradient loss weight")
