@@ -146,6 +146,8 @@ def resolve_device(gpu_id="auto"):
 
 
 def image_to_pil_rgb(image):
+    if isinstance(image, Image.Image):
+        return image.convert("RGB")
     if isinstance(image, np.ndarray):
         return Image.fromarray(image.astype(np.uint8)).convert("RGB")
     return Image.open(image).convert("RGB")
@@ -170,7 +172,9 @@ def load_rgb_image(image, size):
 
 
 def load_mask_array(image, size=None):
-    if isinstance(image, np.ndarray):
+    if isinstance(image, Image.Image):
+        pil_image = image.convert("L")
+    elif isinstance(image, np.ndarray):
         if image.ndim == 3:
             pil_image = Image.fromarray(image.astype(np.uint8)).convert("L")
         else:
