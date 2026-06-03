@@ -382,8 +382,9 @@ def first_pass_blend(
 
     style_reference_img = neural_style_preprocess_image(style_image, ts, device, keep_aspect=True)
     content_reference_img = neural_style_preprocess_tensor(content_reference_tensor)
-    style_targets = [StyleGramMatrix()(feature).detach() for feature in style_vgg(style_reference_img, style_layers)]
-    content_targets = [feature.detach() for feature in style_vgg(content_reference_img, content_layers)]
+    with torch.no_grad():
+        style_targets = [StyleGramMatrix()(feature).detach() for feature in style_vgg(style_reference_img, style_layers)]
+        content_targets = [feature.detach() for feature in style_vgg(content_reference_img, content_layers)]
     targets = style_targets + content_targets
 
     history = []
@@ -484,8 +485,9 @@ def second_pass_blend(
     content_weights = [float(content_weight) * 1e0]
     weights = style_weights + content_weights
 
-    style_targets = [StyleGramMatrix()(feature).detach() for feature in vgg(style_img, style_layers)]
-    content_targets = [feature.detach() for feature in vgg(content_img, content_layers)]
+    with torch.no_grad():
+        style_targets = [StyleGramMatrix()(feature).detach() for feature in vgg(style_img, style_layers)]
+        content_targets = [feature.detach() for feature in vgg(content_img, content_layers)]
     targets = style_targets + content_targets
 
     history = []

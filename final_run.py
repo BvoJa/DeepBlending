@@ -29,6 +29,9 @@ DEFAULT_OUTPUT_DIR = "results/final_run"
 DEFAULT_VGG_MODEL = "Models/vgg_conv.pth"
 VGG_MODEL_FILE_ID = "1lLSi8BXd_9EtudRbIwxvmTQ3Ms-Qh6C8"
 VGG_MODEL_URL = f"https://drive.google.com/uc?id={VGG_MODEL_FILE_ID}"
+DEFAULT_SOURCE_SIZE = 128
+DEFAULT_TARGET_SIZE = 256
+DEFAULT_NUM_STEPS = 100
 
 
 def import_gradio_package():
@@ -469,12 +472,12 @@ def gradient_style_transfer(
     target_image,
     style_image,
     output_dir=DEFAULT_OUTPUT_DIR,
-    source_size=256,
-    target_size=512,
+    source_size=DEFAULT_SOURCE_SIZE,
+    target_size=DEFAULT_TARGET_SIZE,
     x=None,
     y=None,
     gpu_id="auto",
-    num_steps=50000,
+    num_steps=DEFAULT_NUM_STEPS,
     grad_weight=1e4,
     style_weight=1.0,
     content_weight=1.0,
@@ -534,8 +537,9 @@ def gradient_style_transfer(
     content_weights = [float(content_weight) * 1e0]
     weights = style_weights + content_weights
 
-    style_targets = [GramMatrix()(activation).detach() for activation in vgg(style_tensor, style_layers)]
-    content_targets = [activation.detach() for activation in vgg(content_tensor, content_layers)]
+    with torch.no_grad():
+        style_targets = [GramMatrix()(activation).detach() for activation in vgg(style_tensor, style_layers)]
+        content_targets = [activation.detach() for activation in vgg(content_tensor, content_layers)]
     targets = style_targets + content_targets
 
     weights = [float(weight) for weight in weights]
@@ -710,7 +714,7 @@ def run_gradio(
 
 
 def clear_demo():
-    return None, "", None, "", None, "", None, None, {}, "", int(256), int(256)
+    return None, "", None, "", None, "", None, None, {}, "", DEFAULT_TARGET_SIZE // 2, DEFAULT_TARGET_SIZE // 2
 
 
 def load_css():
@@ -737,11 +741,11 @@ def create_demo():
 
                 gr.Markdown("## Placement")
                 with gr.Row():
-                    source_size = gr.Slider(64, 1024, value=256, step=1, label="Source size")
-                    target_size = gr.Slider(128, 1024, value=512, step=1, label="Target size")
+                    source_size = gr.Slider(64, 1024, value=DEFAULT_SOURCE_SIZE, step=1, label="Source size")
+                    target_size = gr.Slider(128, 1024, value=DEFAULT_TARGET_SIZE, step=1, label="Target size")
                 with gr.Row():
-                    x = gr.Slider(0, 1024, value=256, step=1, label="Vertical center")
-                    y = gr.Slider(0, 1024, value=256, step=1, label="Horizontal center")
+                    x = gr.Slider(0, 1024, value=DEFAULT_TARGET_SIZE // 2, step=1, label="Vertical center")
+                    y = gr.Slider(0, 1024, value=DEFAULT_TARGET_SIZE // 2, step=1, label="Horizontal center")
                 with gr.Row():
                     center_button = gr.Button("Use Target Center")
                     preview_button = gr.Button("Preview")
@@ -754,7 +758,7 @@ def create_demo():
                         label="Device",
                         allow_custom_value=True,
                     )
-                    num_steps = gr.Slider(1, 50000, value=50000, step=1, label="LBFGS max iterations")
+                    num_steps = gr.Slider(1, 3000, value=DEFAULT_NUM_STEPS, step=1, label="LBFGS max iterations")
                 grad_weight = gr.Number(value=1e4, label="Gradient loss weight")
                 with gr.Accordion("Advanced", open=False):
                     style_weight = gr.Number(value=1.0, label="NST style weight multiplier")
@@ -832,12 +836,12 @@ def parse_args():
     parser.add_argument("--target_file", type=str, default=None, help="path to the target image")
     parser.add_argument("--style_file", type=str, default=None, help="path to the style image")
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR, help="path to output")
-    parser.add_argument("--source_size", "--ss", type=int, default=256, help="source image size")
-    parser.add_argument("--target_size", "--ts", type=int, default=512, help="target image size")
+    parser.add_argument("--source_size", "--ss", type=int, default=DEFAULT_SOURCE_SIZE, help="source image size")
+    parser.add_argument("--target_size", "--ts", type=int, default=DEFAULT_TARGET_SIZE, help="target image size")
     parser.add_argument("--x", type=int, default=None, help="vertical location center")
     parser.add_argument("--y", type=int, default=None, help="horizontal location center")
     parser.add_argument("--gpu_id", type=str, default="auto", help="auto, cpu, cuda:0, or GPU index")
-    parser.add_argument("--num_steps", type=int, default=50000, help="NST LBFGS max iterations")
+    parser.add_argument("--num_steps", type=int, default=DEFAULT_NUM_STEPS, help="NST LBFGS max iterations")
     parser.add_argument("--grad_weight", type=float, default=1e4, help="gradient loss weight")
     parser.add_argument("--style_weight", type=float, default=1.0, help="multiplier on NST style weights")
     parser.add_argument("--content_weight", type=float, default=1.0, help="multiplier on NST content weights")
