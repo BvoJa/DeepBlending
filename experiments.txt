@@ -1,0 +1,18 @@
+gradient loss, content loss, style loss = [1, 1.25, 0.75]
+{
+  "final_run_edit": {
+    "step": 10000,
+    "grad": 3111.8017578125,
+    "style": 46661.30078125,
+    "content": 285802.59375,
+    "total": 335575.71875,
+    "weight_source": "NST VGG weights: /kaggle/working/DeepBlending/Models/vgg_conv.pth"
+  }
+}
+
+For each harmful chemical class, among durians that truly contain this chemical, 
+the system should correctly classify at least 90% durians into the correct chemical class.
+
+For each harmful chemical class, among durians that truly contain this chemical, the system should correctly
+identify at least 90% of them
+
